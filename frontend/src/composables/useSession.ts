@@ -1,4 +1,4 @@
-import { ref, computed, onBeforeUnmount } from 'vue'
+import { ref, computed } from 'vue'
 import type { Session, Participant, SpinResult } from '../types'
 import * as api from '../api/client'
 import { useWebSocket } from './useWebSocket'
