@@ -1,253 +1,17 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+//! EXPERIMENTAL YDB-backed store targeting the tables from
+//! infra/ydb-schema.sql. Compile-verified against ydb 0.13, but not yet
+//! exercised against a live YDB instance. Compiled only with `--features ydb`.
 
+use std::sync::Arc;
+
+use async_trait::async_trait;
 use rand::prelude::IndexedRandom;
 
 use crate::error::AppError;
 use crate::models::{Participant, Session, SpinResult};
-use crate::ws::Hub;
 
-/// Persistent storage abstraction over sessions and participants.
-///
-/// Covers exactly the operations the HTTP handlers need. Spin and reset are
-/// store-level operations so that a database backend can perform them
-/// transactionally.
-#[allow(async_fn_in_trait)]
-pub trait Store {
-    async fn create_session(&self, session: &Session) -> Result<(), AppError>;
-    async fn get_session(&self, id: &str) -> Result<Option<Session>, AppError>;
-    async fn list_participants(&self, session_id: &str) -> Result<Vec<Participant>, AppError>;
-    /// Append participants to an existing session.
-    async fn add_participants(
-        &self,
-        session_id: &str,
-        participants: &[Participant],
-    ) -> Result<(), AppError>;
-    async fn delete_participant(
-        &self,
-        session_id: &str,
-        participant_id: &str,
-    ) -> Result<(), AppError>;
-    /// Pick a random active participant, mark it removed and return it
-    /// together with the number of remaining active participants.
-    async fn spin(&self, session_id: &str) -> Result<SpinResult, AppError>;
-    /// Restore all participants of a session to the active state.
-    /// Returns the restored participant list.
-    async fn reset_session(&self, session_id: &str) -> Result<Vec<Participant>, AppError>;
-}
+use super::Store;
 
-/// Statically dispatched store used by the application.
-#[derive(Clone)]
-pub enum AnyStore {
-    Memory(MemoryStore),
-    Ydb(YdbStore),
-}
-
-impl Store for AnyStore {
-    async fn create_session(&self, session: &Session) -> Result<(), AppError> {
-        match self {
-            AnyStore::Memory(s) => s.create_session(session).await,
-            AnyStore::Ydb(s) => s.create_session(session).await,
-        }
-    }
-
-    async fn get_session(&self, id: &str) -> Result<Option<Session>, AppError> {
-        match self {
-            AnyStore::Memory(s) => s.get_session(id).await,
-            AnyStore::Ydb(s) => s.get_session(id).await,
-        }
-    }
-
-    async fn list_participants(&self, session_id: &str) -> Result<Vec<Participant>, AppError> {
-        match self {
-            AnyStore::Memory(s) => s.list_participants(session_id).await,
-            AnyStore::Ydb(s) => s.list_participants(session_id).await,
-        }
-    }
-
-    async fn add_participants(
-        &self,
-        session_id: &str,
-        participants: &[Participant],
-    ) -> Result<(), AppError> {
-        match self {
-            AnyStore::Memory(s) => s.add_participants(session_id, participants).await,
-            AnyStore::Ydb(s) => s.add_participants(session_id, participants).await,
-        }
-    }
-
-    async fn delete_participant(
-        &self,
-        session_id: &str,
-        participant_id: &str,
-    ) -> Result<(), AppError> {
-        match self {
-            AnyStore::Memory(s) => s.delete_participant(session_id, participant_id).await,
-            AnyStore::Ydb(s) => s.delete_participant(session_id, participant_id).await,
-        }
-    }
-
-    async fn spin(&self, session_id: &str) -> Result<SpinResult, AppError> {
-        match self {
-            AnyStore::Memory(s) => s.spin(session_id).await,
-            AnyStore::Ydb(s) => s.spin(session_id).await,
-        }
-    }
-
-    async fn reset_session(&self, session_id: &str) -> Result<Vec<Participant>, AppError> {
-        match self {
-            AnyStore::Memory(s) => s.reset_session(session_id).await,
-            AnyStore::Ydb(s) => s.reset_session(session_id).await,
-        }
-    }
-}
-
-/// Shared application state: storage backend plus the WebSocket hub.
-#[derive(Clone)]
-pub struct AppState {
-    pub store: AnyStore,
-    pub hub: Hub,
-}
-
-impl AppState {
-    pub fn new(store: AnyStore) -> Self {
-        Self {
-            store,
-            hub: Hub::new(),
-        }
-    }
-
-    /// Convenience constructor for local development and tests.
-    pub fn in_memory() -> Self {
-        Self::new(AnyStore::Memory(MemoryStore::default()))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// In-memory store
-// ---------------------------------------------------------------------------
-
-/// In-memory storage for local development and tests.
-#[derive(Debug, Clone, Default)]
-pub struct MemoryStore {
-    sessions: Arc<RwLock<HashMap<String, Session>>>,
-    participants: Arc<RwLock<HashMap<String, Vec<Participant>>>>,
-}
-
-impl Store for MemoryStore {
-    async fn create_session(&self, session: &Session) -> Result<(), AppError> {
-        self.sessions
-            .write()
-            .await
-            .insert(session.id.clone(), session.clone());
-        self.participants
-            .write()
-            .await
-            .insert(session.id.clone(), vec![]);
-        Ok(())
-    }
-
-    async fn get_session(&self, id: &str) -> Result<Option<Session>, AppError> {
-        Ok(self.sessions.read().await.get(id).cloned())
-    }
-
-    async fn list_participants(&self, session_id: &str) -> Result<Vec<Participant>, AppError> {
-        Ok(self
-            .participants
-            .read()
-            .await
-            .get(session_id)
-            .cloned()
-            .unwrap_or_default())
-    }
-
-    async fn add_participants(
-        &self,
-        session_id: &str,
-        participants: &[Participant],
-    ) -> Result<(), AppError> {
-        self.participants
-            .write()
-            .await
-            .entry(session_id.to_string())
-            .or_default()
-            .extend_from_slice(participants);
-        Ok(())
-    }
-
-    async fn delete_participant(
-        &self,
-        session_id: &str,
-        participant_id: &str,
-    ) -> Result<(), AppError> {
-        let mut participants = self.participants.write().await;
-        let parts = participants
-            .get_mut(session_id)
-            .ok_or_else(|| AppError::NotFound("Session not found".into()))?;
-
-        let idx = parts
-            .iter()
-            .position(|p| p.id == participant_id)
-            .ok_or_else(|| AppError::NotFound("Participant not found".into()))?;
-
-        parts.remove(idx);
-        Ok(())
-    }
-
-    async fn spin(&self, session_id: &str) -> Result<SpinResult, AppError> {
-        let mut participants = self.participants.write().await;
-        let parts = participants
-            .get_mut(session_id)
-            .ok_or_else(|| AppError::NotFound("Session not found".into()))?;
-
-        let active: Vec<usize> = parts
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| !p.removed)
-            .map(|(i, _)| i)
-            .collect();
-
-        if active.is_empty() {
-            return Err(AppError::NoParticipantsLeft);
-        }
-
-        let spin_order = parts.iter().filter(|p| p.removed).count() as u32 + 1;
-
-        let picked_idx = *active.choose(&mut rand::rng()).unwrap();
-        parts[picked_idx].removed = true;
-        parts[picked_idx].removed_at = Some(chrono::Utc::now());
-        parts[picked_idx].spin_order = Some(spin_order);
-
-        let remaining = parts.iter().filter(|p| !p.removed).count();
-        let picked = parts[picked_idx].clone();
-
-        Ok(SpinResult { picked, remaining })
-    }
-
-    async fn reset_session(&self, session_id: &str) -> Result<Vec<Participant>, AppError> {
-        let mut participants = self.participants.write().await;
-        let parts = participants
-            .get_mut(session_id)
-            .ok_or_else(|| AppError::NotFound("Session not found".into()))?;
-
-        for p in parts.iter_mut() {
-            p.removed = false;
-            p.removed_at = None;
-            p.spin_order = None;
-        }
-
-        Ok(parts.clone())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// YDB store (experimental)
-// ---------------------------------------------------------------------------
-
-/// EXPERIMENTAL: YDB-backed store targeting the tables from
-/// infra/ydb-schema.sql. Compile-verified against ydb 0.13, but not yet
-/// exercised against a live YDB instance.
 #[derive(Clone)]
 pub struct YdbStore {
     client: Arc<ydb::Client>,
@@ -363,6 +127,7 @@ impl YdbStore {
     }
 }
 
+#[async_trait]
 impl Store for YdbStore {
     async fn create_session(&self, session: &Session) -> Result<(), AppError> {
         let session = session.clone();
@@ -449,11 +214,15 @@ impl Store for YdbStore {
     ) -> Result<(), AppError> {
         let session_id = session_id.to_string();
         let participants = participants.to_vec();
-        self.table_client()
+        let outcome = self
+            .table_client()
             .retry_transaction(|mut t| {
                 let session_id = session_id.clone();
                 let participants = participants.clone();
                 async move {
+                    if !Self::session_exists_in_tx(&mut t, &session_id).await? {
+                        return Ok(TxOutcome::SessionNotFound);
+                    }
                     for p in &participants {
                         t.query(
                             ydb::Query::new(
@@ -477,11 +246,12 @@ impl Store for YdbStore {
                         .await?;
                     }
                     t.commit().await?;
-                    Ok(())
+                    Ok(TxOutcome::Ok(()))
                 }
             })
             .await
-            .map_err(ydb_err)
+            .map_err(ydb_err)?;
+        outcome.into_result()
     }
 
     async fn delete_participant(
@@ -609,25 +379,29 @@ impl Store for YdbStore {
                     if !Self::session_exists_in_tx(&mut t, &session_id).await? {
                         return Ok(TxOutcome::SessionNotFound);
                     }
-                    t.query(
-                        ydb::Query::new(
-                            "
-                            DECLARE $session_id AS Utf8;
-                            UPDATE participants
-                            SET removed = false, removed_at = NULL, spin_order = NULL
-                            WHERE session_id = $session_id;
-                            ",
+                    let parts = {
+                        t.query(
+                            ydb::Query::new(
+                                "
+                                DECLARE $session_id AS Utf8;
+                                UPDATE participants
+                                SET removed = false, removed_at = NULL, spin_order = NULL
+                                WHERE session_id = $session_id;
+                                ",
+                            )
+                            .with_params(ydb::ydb_params!("$session_id" => session_id.clone())),
                         )
-                        .with_params(ydb::ydb_params!("$session_id" => session_id.clone())),
-                    )
-                    .await?;
+                        .await?;
+                        // Read back the restored rows inside the same transaction
+                        // so the returned list reflects the committed reset.
+                        Self::participants_in_tx(&mut t, &session_id).await?
+                    };
                     t.commit().await?;
-                    Ok(TxOutcome::Ok(()))
+                    Ok(TxOutcome::Ok(parts))
                 }
             })
             .await
             .map_err(ydb_err)?;
-        outcome.into_result()?;
-        self.list_participants(&session_id).await
+        outcome.into_result()
     }
 }

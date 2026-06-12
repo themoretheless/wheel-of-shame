@@ -5,7 +5,7 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-use wheel_of_shame::db::AppState;
+use wheel_of_shame::store::AppState;
 use wheel_of_shame::routes::create_router;
 
 fn app() -> Router {
