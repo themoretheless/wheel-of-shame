@@ -36,11 +36,6 @@ pub struct AddParticipantsBatchRequest {
     pub names: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Default)]
-pub struct SpinRequest {
-    pub participant_id: Option<String>,
-}
-
 #[derive(Debug, Serialize)]
 pub struct SpinResult {
     pub picked: Participant,

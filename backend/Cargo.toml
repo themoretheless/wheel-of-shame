@@ -16,3 +16,7 @@ rand = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 ydb = "0.13"
 tokio-stream = "0.1"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

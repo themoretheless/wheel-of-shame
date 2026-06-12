@@ -3,15 +3,21 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use rand::prelude::IndexedRandom;
 
-use crate::db::AppState;
+use crate::db::{AppState, Store};
 use crate::error::AppError;
 use crate::models::*;
 use crate::ws::SessionEvent;
 
 pub async fn health() -> &'static str {
     "ok"
+}
+
+async fn ensure_session_exists(state: &AppState, session_id: &str) -> Result<(), AppError> {
+    if state.store.get_session(session_id).await?.is_none() {
+        return Err(AppError::NotFound("Session not found".into()));
+    }
+    Ok(())
 }
 
 pub async fn create_session(
@@ -23,10 +29,7 @@ pub async fn create_session(
     }
 
     let session = Session::new(req.title.trim().to_string());
-    let id = session.id.clone();
-
-    state.sessions.write().await.insert(id.clone(), session.clone());
-    state.participants.write().await.insert(id, vec![]);
+    state.store.create_session(&session).await?;
 
     Ok((StatusCode::CREATED, Json(session)))
 }
@@ -35,14 +38,13 @@ pub async fn get_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let sessions = state.sessions.read().await;
-    let session = sessions
-        .get(&session_id)
-        .ok_or_else(|| AppError::NotFound("Session not found".into()))?
-        .clone();
+    let session = state
+        .store
+        .get_session(&session_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Session not found".into()))?;
 
-    let participants = state.participants.read().await;
-    let parts = participants.get(&session_id).cloned().unwrap_or_default();
+    let parts = state.store.list_participants(&session_id).await?;
 
     Ok(Json(serde_json::json!({
         "session": session,
@@ -59,29 +61,26 @@ pub async fn add_participant(
         return Err(AppError::BadRequest("Name cannot be empty".into()));
     }
 
-    let sessions = state.sessions.read().await;
-    if !sessions.contains_key(&session_id) {
-        return Err(AppError::NotFound("Session not found".into()));
-    }
-    drop(sessions);
+    ensure_session_exists(&state, &session_id).await?;
 
     let participant = Participant::new(session_id.clone(), req.name.trim().to_string());
-    let result = participant.clone();
 
     state
-        .participants
-        .write()
-        .await
-        .entry(session_id.clone())
-        .or_default()
-        .push(participant.clone());
+        .store
+        .add_participants(&session_id, std::slice::from_ref(&participant))
+        .await?;
 
     state
         .hub
-        .broadcast(&session_id, SessionEvent::ParticipantAdded { participant })
+        .broadcast(
+            &session_id,
+            SessionEvent::ParticipantAdded {
+                participant: participant.clone(),
+            },
+        )
         .await;
 
-    Ok((StatusCode::CREATED, Json(result)))
+    Ok((StatusCode::CREATED, Json(participant)))
 }
 
 pub async fn add_participants_batch(
@@ -93,11 +92,7 @@ pub async fn add_participants_batch(
         return Err(AppError::BadRequest("Names list cannot be empty".into()));
     }
 
-    let sessions = state.sessions.read().await;
-    if !sessions.contains_key(&session_id) {
-        return Err(AppError::NotFound("Session not found".into()));
-    }
-    drop(sessions);
+    ensure_session_exists(&state, &session_id).await?;
 
     let mut new_participants = Vec::new();
     for name in &req.names {
@@ -107,45 +102,32 @@ pub async fn add_participants_batch(
         }
     }
 
-    let result = new_participants.clone();
-
     state
-        .participants
-        .write()
-        .await
-        .entry(session_id.clone())
-        .or_default()
-        .extend(new_participants.clone());
+        .store
+        .add_participants(&session_id, &new_participants)
+        .await?;
 
     state
         .hub
         .broadcast(
             &session_id,
             SessionEvent::ParticipantsAdded {
-                participants: new_participants,
+                participants: new_participants.clone(),
             },
         )
         .await;
 
-    Ok((StatusCode::CREATED, Json(result)))
+    Ok((StatusCode::CREATED, Json(new_participants)))
 }
 
 pub async fn delete_participant(
     State(state): State<AppState>,
     Path((session_id, participant_id)): Path<(String, String)>,
 ) -> Result<StatusCode, AppError> {
-    let mut participants = state.participants.write().await;
-    let parts = participants
-        .get_mut(&session_id)
-        .ok_or_else(|| AppError::NotFound("Session not found".into()))?;
-
-    let idx = parts
-        .iter()
-        .position(|p| p.id == participant_id)
-        .ok_or_else(|| AppError::NotFound("Participant not found".into()))?;
-
-    parts.remove(idx);
-    drop(participants);
+    state
+        .store
+        .delete_participant(&session_id, &participant_id)
+        .await?;
 
     state
         .hub
@@ -164,73 +146,31 @@ pub async fn spin(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<SpinResult>, AppError> {
-    let mut participants = state.participants.write().await;
-    let parts = participants
-        .get_mut(&session_id)
-        .ok_or_else(|| AppError::NotFound("Session not found".into()))?;
-
-    let active: Vec<usize> = parts
-        .iter()
-        .enumerate()
-        .filter(|(_, p)| !p.removed)
-        .map(|(i, _)| i)
-        .collect();
-
-    if active.is_empty() {
-        return Err(AppError::NoParticipantsLeft);
-    }
-
-    let spin_order = parts.iter().filter(|p| p.removed).count() as u32 + 1;
-
-    let picked_idx = *active.choose(&mut rand::rng()).unwrap();
-    parts[picked_idx].removed = true;
-    parts[picked_idx].removed_at = Some(chrono::Utc::now());
-    parts[picked_idx].spin_order = Some(spin_order);
-
-    let remaining = parts.iter().filter(|p| !p.removed).count();
-    let picked = parts[picked_idx].clone();
-    drop(participants);
+    let result = state.store.spin(&session_id).await?;
 
     state
         .hub
         .broadcast(
             &session_id,
             SessionEvent::SpinResult {
-                picked: picked.clone(),
-                remaining,
+                picked: result.picked.clone(),
+                remaining: result.remaining,
             },
         )
         .await;
 
-    Ok(Json(SpinResult { picked, remaining }))
+    Ok(Json(result))
 }
 
 pub async fn reset_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    let mut participants = state.participants.write().await;
-    let parts = participants
-        .get_mut(&session_id)
-        .ok_or_else(|| AppError::NotFound("Session not found".into()))?;
-
-    for p in parts.iter_mut() {
-        p.removed = false;
-        p.removed_at = None;
-        p.spin_order = None;
-    }
-
-    let reset_parts = parts.clone();
-    drop(participants);
+    let participants = state.store.reset_session(&session_id).await?;
 
     state
         .hub
-        .broadcast(
-            &session_id,
-            SessionEvent::SessionReset {
-                participants: reset_parts,
-            },
-        )
+        .broadcast(&session_id, SessionEvent::SessionReset { participants })
         .await;
 
     Ok(StatusCode::OK)
@@ -242,12 +182,7 @@ pub async fn session_ws(
     Path(session_id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, AppError> {
-    // Verify session exists.
-    let sessions = state.sessions.read().await;
-    if !sessions.contains_key(&session_id) {
-        return Err(AppError::NotFound("Session not found".into()));
-    }
-    drop(sessions);
+    ensure_session_exists(&state, &session_id).await?;
 
     let rx = state.hub.subscribe(&session_id).await;
 

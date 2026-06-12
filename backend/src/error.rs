@@ -7,6 +7,7 @@ pub enum AppError {
     NotFound(String),
     BadRequest(String),
     NoParticipantsLeft,
+    Internal(String),
 }
 
 impl IntoResponse for AppError {
@@ -18,6 +19,13 @@ impl IntoResponse for AppError {
                 StatusCode::CONFLICT,
                 "No active participants left to pick".to_string(),
             ),
+            AppError::Internal(msg) => {
+                tracing::error!("internal error: {msg}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal server error".to_string(),
+                )
+            }
         };
 
         let body = axum::Json(json!({ "error": message }));

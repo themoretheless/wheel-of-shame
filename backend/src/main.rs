@@ -1,12 +1,8 @@
-mod db;
-mod error;
-mod handlers;
-mod models;
-mod routes;
-mod ws;
-
 use std::env;
 use tower_http::cors::{Any, CorsLayer};
+
+use wheel_of_shame::db::{AnyStore, AppState, MemoryStore, YdbStore};
+use wheel_of_shame::routes;
 
 #[tokio::main]
 async fn main() {
@@ -20,7 +16,21 @@ async fn main() {
         .allow_methods(Any)
         .allow_headers(Any);
 
-    let state = db::AppState::new();
+    let store = match env::var("YDB_CONNECTION_STRING") {
+        Ok(connection_string) => {
+            tracing::warn!("storage: YDB (experimental), connecting via YDB_CONNECTION_STRING");
+            let ydb = YdbStore::connect(&connection_string)
+                .await
+                .expect("failed to connect to YDB");
+            AnyStore::Ydb(ydb)
+        }
+        Err(_) => {
+            tracing::info!("storage: in-memory (set YDB_CONNECTION_STRING to use YDB)");
+            AnyStore::Memory(MemoryStore::default())
+        }
+    };
+
+    let state = AppState::new(store);
     let app = routes::create_router(state).layer(cors);
 
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
