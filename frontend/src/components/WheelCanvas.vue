@@ -108,6 +108,80 @@ const curvedTextGeoCache = new Map<string, THREE.BufferGeometry>()
 const segGeoCache = new Map<number, THREE.ExtrudeGeometry>()
 let sharedDividerGeo: THREE.BufferGeometry | null = null
 
+// ShapePath.toShapes assumes consistent contour winding, but Roboto (like
+// many Google fonts) ships glyphs with unremoved overlaps: stems and
+// crossbars are separate same-winding contours that overlap, and only true
+// counters (inside of О etc.) wind the opposite way. One opposite-winding
+// contour in a name made toShapes(false) collapse the whole name into a
+// single shape with every other letter as a hole, producing black blobs.
+// Instead: contours with the dominant winding sign are independent solids;
+// opposite-sign contours become holes of the smallest solid containing them.
+function pointInPolygon(p: THREE.Vector2, poly: THREE.Vector2[]): boolean {
+  let inside = false
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const a = poly[i]
+    const b = poly[j]
+    if ((a.y > p.y) !== (b.y > p.y) && p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x) {
+      inside = !inside
+    }
+  }
+  return inside
+}
+
+function shapePathToShapes(shapePath: THREE.ShapePath): THREE.Shape[] {
+  const subPaths = shapePath.subPaths.filter((sp) => sp.curves.length > 0)
+  const pts = subPaths.map((sp) => sp.getPoints())
+  const areas = pts.map((p) => THREE.ShapeUtils.area(p))
+  const n = subPaths.length
+
+  // Dominant winding = winding of the contour with the largest absolute area
+  let domSign = 1
+  let maxAbs = 0
+  for (const a of areas) {
+    if (Math.abs(a) > maxAbs) {
+      maxAbs = Math.abs(a)
+      domSign = Math.sign(a) || 1
+    }
+  }
+
+  const shapes: THREE.Shape[] = []
+  const solidIdx: number[] = [] // subPath index per shape
+  for (let i = 0; i < n; i++) {
+    if (Math.sign(areas[i]) !== domSign && areas[i] !== 0) continue
+    const shape = new THREE.Shape()
+    shape.curves = subPaths[i].curves
+    solidIdx.push(i)
+    shapes.push(shape)
+  }
+  for (let i = 0; i < n; i++) {
+    if (Math.sign(areas[i]) === domSign || areas[i] === 0) continue
+    // Attach to the smallest solid that contains this contour
+    let best = -1
+    let bestArea = Infinity
+    for (let s = 0; s < solidIdx.length; s++) {
+      const j = solidIdx[s]
+      const abs = Math.abs(areas[j])
+      if (abs <= Math.abs(areas[i]) || abs >= bestArea) continue
+      if (pointInPolygon(pts[i][0], pts[j])) {
+        best = s
+        bestArea = abs
+      }
+    }
+    if (best !== -1) {
+      const hole = new THREE.Path()
+      hole.curves = subPaths[i].curves
+      shapes[best].holes.push(hole)
+    } else {
+      // No container found: keep it solid rather than dropping geometry
+      const shape = new THREE.Shape()
+      shape.curves = subPaths[i].curves
+      shapes.push(shape)
+      solidIdx.push(i)
+    }
+  }
+  return shapes
+}
+
 function getTextGeometry(text: string, size: number, depth: number): THREE.BufferGeometry | null {
   if (!otFont) return null
   const key = `${text}_${size}_${depth}`
@@ -131,7 +205,7 @@ function getTextGeometry(text: string, size: number, depth: number): THREE.Buffe
     }
   }
 
-  const shapes = shapePath.toShapes(false)
+  const shapes = shapePathToShapes(shapePath)
   if (shapes.length === 0) return null
 
   const geo = new THREE.ExtrudeGeometry(shapes, {
