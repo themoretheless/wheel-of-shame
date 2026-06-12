@@ -81,6 +81,9 @@ function getCenterGroup(): THREE.Group {
   const rimGeo = new THREE.TorusGeometry(WHEEL_RADIUS + 0.02, 0.045, 12, 80)
   cachedCenterGroup.add(new THREE.Mesh(rimGeo, getCachedMat('#bdc3c7', 0.6, 0.25)))
 
+  // Clones share these geometries/materials — protect them from clearGroup.
+  cachedCenterGroup.children.forEach((c) => { c.userData.sharedGeometry = true })
+
   return cachedCenterGroup.clone(true)
 }
 let currentRotation = 0
@@ -99,19 +102,21 @@ const WHEEL_DEPTH = 0.3
 
 
 const textGeoCache = new Map<string, THREE.BufferGeometry>()
+// Curved (arc-bent) text geometry depends only on (text, size, depth) — the
+// bend radius is constant — so it is cached and shared between rebuilds.
+const curvedTextGeoCache = new Map<string, THREE.BufferGeometry>()
+const segGeoCache = new Map<number, THREE.ExtrudeGeometry>()
+let sharedDividerGeo: THREE.BufferGeometry | null = null
 
 function getTextGeometry(text: string, size: number, depth: number): THREE.BufferGeometry | null {
   if (!otFont) return null
   const key = `${text}_${size}_${depth}`
   if (textGeoCache.has(key)) return textGeoCache.get(key)!
 
-  // Use ShapePath — automatically handles holes (О, А, Б, etc.)
-  // Opentype Y is inverted vs Three.js — negate X to mirror so text reads correctly
-  // after being bent along the arc (which reverses reading direction)
+  // ShapePath handles holes (О, А, Б, etc.). X is mirrored so the text reads
+  // correctly after the arc bend reverses its direction.
   const otPath = otFont.getPath(text, 0, 0, size)
-
-  // Get text width for centering after X-flip
-  const otBB = otFont.getPath(text, 0, 0, size).getBoundingBox()
+  const otBB = otPath.getBoundingBox()
   const textW = otBB.x2 - otBB.x1
 
   const shapePath = new THREE.ShapePath()
@@ -144,6 +149,140 @@ function getTextGeometry(text: string, size: number, depth: number): THREE.Buffe
   return geo
 }
 
+function getCurvedTextGeometry(text: string, size: number, depth: number): THREE.BufferGeometry | null {
+  const key = `${text}_${size}_${depth}`
+  const cached = curvedTextGeoCache.get(key)
+  if (cached) return cached
+
+  const srcGeo = getTextGeometry(text, size, depth)
+  if (!srcGeo) return null
+  const curvedGeo = srcGeo.clone()
+
+  // Assign material groups using pre-bend normals. Bent-position based
+  // classification misclassifies bevels (mid-Z position but cap-facing
+  // normal) and leaks segment colour onto letter edges.
+  // Reorder triangles so all cap faces come first, then all side faces.
+  // This yields exactly two material groups — interleaved groups produce
+  // a draw call per run (tens of thousands per frame in the worst case).
+  const origNormals = curvedGeo.getAttribute('normal')
+  const idx = curvedGeo.getIndex()
+  curvedGeo.clearGroups()
+  const faceCount = idx ? idx.count / 3 : origNormals.count / 3
+  const faceMat = new Uint8Array(faceCount)
+  let capFaces = 0
+  for (let ti = 0; ti < faceCount; ti++) {
+    const i0 = idx ? idx.getX(ti * 3) : ti * 3
+    const i1 = idx ? idx.getY(ti * 3) : ti * 3 + 1
+    const i2 = idx ? idx.getZ(ti * 3) : ti * 3 + 2
+    const nz = (Math.abs(origNormals.getZ(i0))
+              + Math.abs(origNormals.getZ(i1))
+              + Math.abs(origNormals.getZ(i2))) / 3
+    const mat = nz > 0.5 ? 0 : 1
+    faceMat[ti] = mat
+    if (mat === 0) capFaces++
+  }
+  if (!idx) {
+    // ExtrudeGeometry is non-indexed: physically reorder the vertex data.
+    const attrNames = Object.keys(curvedGeo.attributes)
+    for (const name of attrNames) {
+      const attr = curvedGeo.getAttribute(name) as THREE.BufferAttribute
+      const itemSize = attr.itemSize
+      const src = attr.array as Float32Array
+      const dst = new Float32Array(src.length)
+      let cap = 0
+      let side = capFaces
+      for (let ti = 0; ti < faceCount; ti++) {
+        const dstFace = faceMat[ti] === 0 ? cap++ : side++
+        const from = ti * 3 * itemSize
+        const to = dstFace * 3 * itemSize
+        for (let k = 0; k < 3 * itemSize; k++) dst[to + k] = src[from + k]
+      }
+      curvedGeo.setAttribute(name, new THREE.BufferAttribute(dst, itemSize))
+    }
+    curvedGeo.addGroup(0, capFaces * 3, 0)
+    curvedGeo.addGroup(capFaces * 3, (faceCount - capFaces) * 3, 1)
+  } else {
+    // Indexed fallback: reorder the index buffer only.
+    const srcIdx = idx.array
+    const dstIdx = new (srcIdx.constructor as any)(srcIdx.length)
+    let cap = 0
+    let side = capFaces
+    for (let ti = 0; ti < faceCount; ti++) {
+      const dstFace = faceMat[ti] === 0 ? cap++ : side++
+      dstIdx[dstFace * 3] = srcIdx[ti * 3]
+      dstIdx[dstFace * 3 + 1] = srcIdx[ti * 3 + 1]
+      dstIdx[dstFace * 3 + 2] = srcIdx[ti * 3 + 2]
+    }
+    curvedGeo.setIndex(new THREE.BufferAttribute(dstIdx, 1))
+    curvedGeo.addGroup(0, capFaces * 3, 0)
+    curvedGeo.addGroup(capFaces * 3, (faceCount - capFaces) * 3, 1)
+  }
+
+  const arcR = WHEEL_INNER + (WHEEL_RADIUS - WHEEL_INNER) * 0.65
+  const pos = curvedGeo.getAttribute('position')
+  const r = arcR * 100
+  for (let vi = 0; vi < pos.count; vi++) {
+    const x = pos.getX(vi)
+    const y = pos.getY(vi)
+    const angle = x / r
+    const radius = r + y
+    pos.setX(vi, Math.cos(angle) * radius)
+    pos.setY(vi, Math.sin(angle) * radius)
+  }
+  pos.needsUpdate = true
+
+  curvedTextGeoCache.set(key, curvedGeo)
+  return curvedGeo
+}
+
+// Segment geometry built at start angle 0 and cached by quantized slice
+// angle; the mesh itself is rotated into place. During the shrink animation
+// every frame has only two distinct slice angles, so rebuilds become
+// cache hits instead of fresh ExtrudeGeometry tessellations.
+const SEG_GEO_CACHE_LIMIT = 64
+
+function getSegmentGeometry(segAngle: number): THREE.ExtrudeGeometry {
+  const key = Math.round(segAngle * 2048)
+  const cached = segGeoCache.get(key)
+  if (cached) return cached
+  // During the shrink animation every frame produces new angles; evict
+  // oldest entries so the cache stays bounded.
+  if (segGeoCache.size >= SEG_GEO_CACHE_LIMIT) {
+    const oldestKey = segGeoCache.keys().next().value!
+    segGeoCache.get(oldestKey)!.dispose()
+    segGeoCache.delete(oldestKey)
+  }
+
+  const shape = new THREE.Shape()
+  shape.absarc(0, 0, WHEEL_RADIUS, 0, segAngle, false)
+  shape.absarc(0, 0, WHEEL_INNER, segAngle, 0, true)
+  const geo = new THREE.ExtrudeGeometry(shape, {
+    depth: WHEEL_DEPTH,
+    bevelEnabled: true,
+    bevelThickness: 0.015,
+    bevelSize: 0.015,
+    bevelSegments: 1,
+  })
+  segGeoCache.set(key, geo)
+  return geo
+}
+
+function getDividerGeo(): THREE.BufferGeometry {
+  if (!sharedDividerGeo) {
+    sharedDividerGeo = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(WHEEL_INNER, 0, WHEEL_DEPTH / 2 + 0.01),
+      new THREE.Vector3(WHEEL_RADIUS, 0, WHEEL_DEPTH / 2 + 0.01),
+    ])
+  }
+  return sharedDividerGeo
+}
+
+function measureTextWidth(text: string, size: number): number {
+  if (!otFont) return 0
+  const bb = otFont.getPath(text, 0, 0, size).getBoundingBox()
+  return bb.x2 - bb.x1
+}
+
 function isLightColor(hex: string): boolean {
   const r = parseInt(hex.slice(1, 3), 16)
   const g = parseInt(hex.slice(3, 5), 16)
@@ -152,6 +291,11 @@ function isLightColor(hex: string): boolean {
 }
 
 function disposeChild(obj: THREE.Object3D) {
+  // Geometries and materials from the shared caches outlive the rebuild.
+  if (obj.userData.sharedGeometry) {
+    obj.children.forEach(disposeChild)
+    return
+  }
   if (obj instanceof THREE.Mesh) {
     obj.geometry.dispose()
     const mats = Array.isArray(obj.material) ? obj.material : [obj.material]
@@ -159,6 +303,7 @@ function disposeChild(obj: THREE.Object3D) {
       if (m.map) m.map.dispose()
       m.dispose()
     })
+    obj.children.forEach(disposeChild)
   }
   if (obj instanceof THREE.Line) {
     obj.geometry.dispose()
@@ -246,6 +391,32 @@ function buildWheelWithAngles(
   const sliceAngle = (Math.PI * 2) / active.length
   let cursor = 0
 
+  // Uniform text sizing based on sliceAngle (not per-segment angles[i]) so
+  // size stays stable during shrink animation. Shrink down first, then
+  // truncate names that still overflow.
+  const arcR = WHEEL_INNER + (WHEEL_RADIUS - WHEEL_INNER) * 0.65
+  const textDepth = 4
+  const baseTextSize = Math.min(28, Math.max(14, 110 / active.length))
+  const maxArcWidth = sliceAngle * 0.85 * arcR * 100
+  const displayNames: string[] = active.map((p) =>
+    p.name.length > 20 ? p.name.slice(0, 19) + '…' : p.name,
+  )
+  let textSize = baseTextSize
+  if (otFont) {
+    let scale = 1
+    for (const n of displayNames) {
+      const w = measureTextWidth(n, baseTextSize)
+      if (w > maxArcWidth) scale = Math.min(scale, maxArcWidth / w)
+    }
+    textSize = Math.max(10, baseTextSize * scale)
+    for (let i = 0; i < displayNames.length; i++) {
+      while (displayNames[i].length > 1 && measureTextWidth(displayNames[i], textSize) > maxArcWidth) {
+        const base = displayNames[i].replace(/…$/, '')
+        displayNames[i] = base.slice(0, -1) + '…'
+      }
+    }
+  }
+
   active.forEach((p, i) => {
     const segAngle = angles ? angles[i] : sliceAngle
     if (segAngle < 0.005) {
@@ -259,117 +430,36 @@ function buildWheelWithAngles(
     const color = COLORS[i % COLORS.length]
     const alpha = alphas ? alphas[i] : 1
 
-    const shape = new THREE.Shape()
-    shape.absarc(0, 0, WHEEL_RADIUS, startAngle, startAngle + segAngle, false)
-    shape.absarc(0, 0, WHEEL_INNER, startAngle + segAngle, startAngle, true)
-
-    const geo = new THREE.ExtrudeGeometry(shape, {
-      depth: WHEEL_DEPTH,
-      bevelEnabled: true,
-      bevelThickness: 0.015,
-      bevelSize: 0.015,
-      bevelSegments: 1,
-    })
     const mat = alpha < 1
       ? new THREE.MeshStandardMaterial({ color, metalness: 0.1, roughness: 0.55, transparent: true, opacity: alpha })
       : getCachedMat(color, 0.1, 0.55)
-    const mesh = new THREE.Mesh(geo, mat)
+    const mesh = new THREE.Mesh(getSegmentGeometry(segAngle), mat)
     mesh.position.z = -WHEEL_DEPTH / 2
+    mesh.rotation.z = startAngle
     mesh.userData.participantId = p.id
     mesh.userData.segmentIndex = i
+    mesh.userData.sharedGeometry = true
     segmentMeshes.push(mesh)
     wheelGroup.add(mesh)
 
-    // Divider line
-    const pts = [
-      new THREE.Vector3(
-        Math.cos(startAngle) * WHEEL_INNER,
-        Math.sin(startAngle) * WHEEL_INNER,
-        WHEEL_DEPTH / 2 + 0.01,
-      ),
-      new THREE.Vector3(
-        Math.cos(startAngle) * WHEEL_RADIUS,
-        Math.sin(startAngle) * WHEEL_RADIUS,
-        WHEEL_DEPTH / 2 + 0.01,
-      ),
-    ]
-    const lineGeo = new THREE.BufferGeometry().setFromPoints(pts)
-    wheelGroup.add(new THREE.Line(lineGeo, getLineMat()))
+    // Divider line (shared geometry, rotated into place)
+    const line = new THREE.Line(getDividerGeo(), getLineMat())
+    line.rotation.z = startAngle
+    line.userData.sharedGeometry = true
+    wheelGroup.add(line)
 
-    // 3D extruded text bent along the arc
-    const midAngle = startAngle + segAngle / 2
-    const arcR = WHEEL_INNER + (WHEEL_RADIUS - WHEEL_INNER) * 0.65
-    const name = p.name.length > 12 ? p.name.slice(0, 11) + '…' : p.name
-    const light = isLightColor(color)
-
-    const textSize = Math.min(28, Math.max(14, 110 / active.length))
-    const textDepth = 4
-    const srcGeo = getTextGeometry(name, textSize, textDepth)
-    if (srcGeo) {
-      // Clone and bend vertices along the arc
-      const curvedGeo = srcGeo.clone()
-      const pos = curvedGeo.getAttribute('position')
-      const r = arcR * 100 // work in font units (scale 1/100)
-
-      for (let vi = 0; vi < pos.count; vi++) {
-        const x = pos.getX(vi) // along text width → angle on arc
-        const y = pos.getY(vi) // text height → radial offset
-        const z = pos.getZ(vi) // extrude depth → Z towards camera
-
-        const angle = x / r
-        const radius = r + y
-        pos.setX(vi, Math.cos(angle) * radius)
-        pos.setY(vi, Math.sin(angle) * radius)
-        pos.setZ(vi, z)
-      }
-      pos.needsUpdate = true
-      // Recompute normals: front faces should point +Z (towards camera)
-      // After bending, computeVertexNormals gives wrong results, so set manually
-      const normals = curvedGeo.getAttribute('normal')
-      for (let vi = 0; vi < normals.count; vi++) {
-        const z = pos.getZ(vi)
-        if (z > textDepth * 0.5) {
-          // Front face — point towards camera
-          normals.setXYZ(vi, 0, 0, 1)
-        } else if (z < 0.5) {
-          // Back face
-          normals.setXYZ(vi, 0, 0, -1)
-        } else {
-          // Side faces — point outward from arc center
-          const x = pos.getX(vi)
-          const y = pos.getY(vi)
-          const len = Math.sqrt(x * x + y * y) || 1
-          normals.setXYZ(vi, x / len, y / len, 0)
-        }
-      }
-      normals.needsUpdate = true
-
-      const scale = 1 / 100
-      // Color faces by normal direction: front/back (Z-facing) = black, sides = segment color
+    const name = displayNames[i]
+    const curvedGeo = getCurvedTextGeometry(name, textSize, textDepth)
+    if (curvedGeo) {
       const blackMat = new THREE.MeshBasicMaterial({ color: '#000000', side: THREE.DoubleSide })
       const segColorMat = new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide })
-
-      // Split into 2 groups by checking face normals
-      const norms = curvedGeo.getAttribute('normal')
-      const idx = curvedGeo.getIndex()
-      if (idx) {
-        // Clear existing groups
-        curvedGeo.clearGroups()
-
-        for (let fi = 0; fi < idx.count; fi += 3) {
-          const i0 = idx.getX(fi)
-          const nz = Math.abs(norms.getZ(i0))
-          // If normal mostly faces Z → front/back face → black (0)
-          // Otherwise → side face → segment color (1)
-          const matIdx = nz > 0.5 ? 0 : 1
-          curvedGeo.addGroup(fi, 3, matIdx)
-        }
-      }
-
       const textMesh = new THREE.Mesh(curvedGeo, [blackMat, segColorMat])
-      textMesh.scale.set(scale, scale, scale)
+      textMesh.scale.set(1 / 100, 1 / 100, 1 / 100)
       textMesh.position.z = WHEEL_DEPTH + 0.02
-      textMesh.rotation.z = midAngle
+      // Parent segment is rotated by startAngle, so only the half-slice
+      // offset remains.
+      textMesh.rotation.z = segAngle / 2
+      textMesh.userData.sharedGeometry = true
       mesh.add(textMesh)
     }
   })
@@ -705,6 +795,7 @@ function initScene() {
     if (font) {
       otFont = font
       textGeoCache.clear()
+      curvedTextGeoCache.clear()
       buildWheel()
     }
   })
@@ -1054,6 +1145,15 @@ onMounted(() => {
 onBeforeUnmount(() => {
   cancelAnimationFrame(animFrameId)
   window.removeEventListener('resize', handleResize)
+  textGeoCache.forEach((g) => g.dispose())
+  textGeoCache.clear()
+  curvedTextGeoCache.forEach((g) => g.dispose())
+  curvedTextGeoCache.clear()
+  segGeoCache.forEach((g) => g.dispose())
+  segGeoCache.clear()
+  cachedMaterials.forEach((m) => m.dispose())
+  cachedMaterials.clear()
+  if (sharedDividerGeo) sharedDividerGeo.dispose()
   if (controls) controls.dispose()
   if (renderer) {
     renderer.domElement.remove()
