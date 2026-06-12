@@ -15,6 +15,85 @@ let suppressWsSpin = false
 
 const ws = useWebSocket()
 
+// --- WebSocket auto-reconnect with exponential backoff ---
+//
+// On an unexpected close we retry indefinitely: wait (0.5s doubling up to a
+// 10s cap, plus jitter), then re-fetch the session over REST so any events
+// missed during the outage are recovered, then re-open the WebSocket.
+//
+// Sessions are in-memory server-side, so after a backend restart the REST
+// re-fetch returns 404. In that case we stop retrying, clear the session and
+// surface the error state (the create screen with an explanatory message)
+// instead of hanging or looping forever.
+const RECONNECT_BASE_MS = 500
+const RECONNECT_CAP_MS = 10_000
+const RECONNECT_JITTER_MS = 250
+let reconnectAttempt = 0
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+// Bumped whenever a new connection is established intentionally (load/create)
+// or the session is torn down, invalidating any in-flight reconnect loop.
+let reconnectGen = 0
+
+function cancelReconnect() {
+  reconnectGen++
+  reconnectAttempt = 0
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
+}
+
+function scheduleReconnect() {
+  if (!session.value || reconnectTimer) return
+  const gen = reconnectGen
+  const backoff = Math.min(
+    RECONNECT_BASE_MS * 2 ** reconnectAttempt,
+    RECONNECT_CAP_MS,
+  )
+  const delay = backoff + Math.random() * RECONNECT_JITTER_MS
+  reconnectAttempt++
+  console.log(
+    `[ws] connection lost, reconnect attempt ${reconnectAttempt} in ${Math.round(delay)}ms`,
+  )
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null
+    void attemptReconnect(gen)
+  }, delay)
+}
+
+async function attemptReconnect(gen: number) {
+  if (gen !== reconnectGen || !session.value) return
+  const id = session.value.id
+  try {
+    // Re-fetch state first so events missed during the outage are not lost.
+    const data = await api.getSession(id)
+    if (gen !== reconnectGen) return
+    session.value = data.session
+    participants.value = data.participants
+    error.value = null
+    reconnectAttempt = 0
+    console.log('[ws] session state re-synced, reopening websocket')
+    ws.connect(id)
+  } catch (e: any) {
+    if (gen !== reconnectGen) return
+    if (e?.status === 404) {
+      console.log('[ws] session no longer exists on server, giving up')
+      cancelReconnect()
+      session.value = null
+      participants.value = []
+      error.value =
+        'Session no longer exists (the server may have restarted). Please create a new session.'
+      return
+    }
+    // Server unreachable or transient error: keep backing off.
+    scheduleReconnect()
+  }
+}
+
+ws.onUnexpectedClose(() => {
+  scheduleReconnect()
+})
+
 ws.onMessage((event: any) => {
   switch (event.type) {
     case 'participant_added': {
@@ -78,6 +157,7 @@ export function useSession() {
     loading.value = true
     error.value = null
     try {
+      cancelReconnect()
       session.value = await api.createSession(title)
       participants.value = []
       window.location.hash = `#/${session.value.id}`
@@ -93,6 +173,7 @@ export function useSession() {
     loading.value = true
     error.value = null
     try {
+      cancelReconnect()
       const data = await api.getSession(id)
       session.value = data.session
       participants.value = data.participants

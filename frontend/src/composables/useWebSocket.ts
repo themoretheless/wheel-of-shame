@@ -5,14 +5,14 @@ export interface UseWebSocket {
   connect: (sessionId: string) => void
   disconnect: () => void
   onMessage: (handler: (event: any) => void) => void
+  onUnexpectedClose: (handler: () => void) => void
 }
 
 export function useWebSocket(): UseWebSocket {
   const connected = ref(false)
   let ws: WebSocket | null = null
   let messageHandler: ((event: any) => void) | null = null
-  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
-  let currentSessionId: string | null = null
+  let closeHandler: (() => void) | null = null
 
   function getWsUrl(sessionId: string): string {
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -24,7 +24,6 @@ export function useWebSocket(): UseWebSocket {
 
   function connect(sessionId: string) {
     disconnect()
-    currentSessionId = sessionId
 
     ws = new WebSocket(getWsUrl(sessionId))
 
@@ -34,12 +33,9 @@ export function useWebSocket(): UseWebSocket {
 
     ws.onclose = () => {
       connected.value = false
-      // Auto-reconnect after 2s
-      if (currentSessionId) {
-        reconnectTimer = setTimeout(() => {
-          if (currentSessionId) connect(currentSessionId)
-        }, 2000)
-      }
+      // Unexpected close (network drop, server gone). Intentional closes
+      // go through disconnect(), which clears this handler first.
+      closeHandler?.()
     }
 
     ws.onerror = () => {
@@ -58,13 +54,9 @@ export function useWebSocket(): UseWebSocket {
   }
 
   function disconnect() {
-    currentSessionId = null
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer)
-      reconnectTimer = null
-    }
     if (ws) {
       ws.onclose = null
+      ws.onerror = null
       ws.close()
       ws = null
     }
@@ -75,5 +67,9 @@ export function useWebSocket(): UseWebSocket {
     messageHandler = handler
   }
 
-  return { connected, connect, disconnect, onMessage }
+  function onUnexpectedClose(handler: () => void) {
+    closeHandler = handler
+  }
+
+  return { connected, connect, disconnect, onMessage, onUnexpectedClose }
 }
