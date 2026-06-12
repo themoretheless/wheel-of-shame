@@ -4,7 +4,6 @@
 **/*.rs.bk
 *.pdb
 **/mutants.out*/
-Cargo.lock
 
 # Vue / Node
 **/node_modules/
