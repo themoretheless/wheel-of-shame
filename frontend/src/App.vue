@@ -81,8 +81,9 @@ function getTextEdgePoints(w: number, h: number): [number, number][] {
 }
 
 function initFlame() {
-  const canvas = flameCanvas.value
-  if (!canvas) return
+  const canvasEl = flameCanvas.value
+  if (!canvasEl) return
+  const canvas: HTMLCanvasElement = canvasEl
   const ctx = canvas.getContext('2d')!
 
   const particles: Particle[] = []

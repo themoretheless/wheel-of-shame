@@ -93,6 +93,7 @@ let lastAzimuth = 0
 let azimuthVelocity = 0
 let isPointerDown = false
 let flickCooldown = 0
+const BASE_CAM_Z = 7.8
 let homeCamZ = BASE_CAM_Z
 const FLICK_THRESHOLD = 0.06 // radians per frame — trigger spin
 
@@ -369,13 +370,6 @@ function measureTextWidth(text: string, size: number): number {
   return w
 }
 
-function isLightColor(hex: string): boolean {
-  const r = parseInt(hex.slice(1, 3), 16)
-  const g = parseInt(hex.slice(3, 5), 16)
-  const b = parseInt(hex.slice(5, 7), 16)
-  return (r * 299 + g * 587 + b * 114) / 1000 > 150
-}
-
 function disposeChild(obj: THREE.Object3D) {
   // Geometries and materials from the shared caches outlive the rebuild.
   if (obj.userData.sharedGeometry) {
@@ -409,47 +403,6 @@ function resetSegments() {
   for (const seg of segmentMeshes) {
     seg.position.z = -WHEEL_DEPTH / 2
   }
-  segmentBumps = []
-}
-
-const POINTER_BUMP = 0.15
-const BUMP_LERP_SPEED = 0.12 // 0..1, higher = snappier
-let segmentBumps: number[] = [] // current Z offset per segment
-
-function updatePointerHighlight() {
-  if (segmentMeshes.length === 0) return
-  const count = segmentMeshes.length
-
-  // Ensure bumps array matches segment count
-  if (segmentBumps.length !== count) {
-    segmentBumps = new Array(count).fill(0)
-  }
-
-  const sliceAngle = (Math.PI * 2) / count
-
-  let angle = currentRotation % (Math.PI * 2)
-  if (angle < 0) angle += Math.PI * 2
-
-  // Pointer is at PI/2. For each segment, calculate angular distance to pointer.
-  for (let i = 0; i < count; i++) {
-    const segCenter = i * sliceAngle + sliceAngle / 2
-    // Angular distance between segment center (rotated) and pointer
-    let dist = ((segCenter + angle - Math.PI / 2) % (Math.PI * 2))
-    if (dist < 0) dist += Math.PI * 2
-    if (dist > Math.PI) dist = Math.PI * 2 - dist
-    // Normalize: 0 = directly at pointer, 1 = opposite side
-    const proximity = 1 - dist / Math.PI
-    // Only bump segments that are close (within ~1.5 segments)
-    const threshold = sliceAngle * 1.5
-    const target = dist < threshold
-      ? POINTER_BUMP * Math.pow(1 - dist / threshold, 1.5)
-      : 0
-    // Lerp towards target for smooth transitions
-    segmentBumps[i] += (target - segmentBumps[i]) * BUMP_LERP_SPEED
-    // Clamp tiny values to zero
-    if (Math.abs(segmentBumps[i]) < 0.001) segmentBumps[i] = 0
-    segmentMeshes[i].position.z = -WHEEL_DEPTH / 2 + segmentBumps[i]
-  }
 }
 
 // Build wheel with custom per-segment angles. If no angles given, equal slices.
@@ -459,7 +412,8 @@ function buildWheelWithAngles(
   alphas?: number[], // opacity per segment (0..1)
 ) {
   if (!wheelGroup) return
-  clearGroup(wheelGroup)
+  const group: THREE.Group = wheelGroup
+  clearGroup(group)
   segmentMeshes = []
   markDirty()
 
@@ -527,13 +481,13 @@ function buildWheelWithAngles(
     mesh.userData.segmentIndex = i
     mesh.userData.sharedGeometry = true
     segmentMeshes.push(mesh)
-    wheelGroup.add(mesh)
+    group.add(mesh)
 
     // Divider line (shared geometry, rotated into place)
     const line = new THREE.Line(getDividerGeo(), getLineMat())
     line.rotation.z = startAngle
     line.userData.sharedGeometry = true
-    wheelGroup.add(line)
+    group.add(line)
 
     const name = displayNames[i]
     const curvedGeo = getCurvedTextGeometry(name, textSize, textDepth)
@@ -613,7 +567,6 @@ function animateSegmentShrink(winnerId: string, callback: () => void) {
 
 const MENU_WIDTH = 360 // 320px panel + 20px gap + margin
 const PADDING = 40 // extra breathing room in pixels
-const BASE_CAM_Z = 7.8
 const CAM_FOV = 38
 
 function fitWheel() {
@@ -1098,22 +1051,9 @@ function dismissWinner() {
 
 defineExpose({ dismissWinner })
 
-function getWinnerFromAngle(active: { id: string }[]): string {
-  // Pointer is at top (PI/2). Find which segment is there.
-  const sliceAngle = (Math.PI * 2) / active.length
-  // Normalize rotation to 0..2PI
-  let angle = currentRotation % (Math.PI * 2)
-  if (angle < 0) angle += Math.PI * 2
-  // Pointer at PI/2: segment index = floor((PI/2 - angle) / sliceAngle) mod count
-  let pointerAngle = (Math.PI / 2 - angle) % (Math.PI * 2)
-  if (pointerAngle < 0) pointerAngle += Math.PI * 2
-  const idx = Math.floor(pointerAngle / sliceAngle) % active.length
-  return active[idx].id
-}
-
 function animateSpin() {
   const active = props.participants.filter((p) => !p.removed)
-  if (active.length === 0 || !props.winnerId) return
+  if (active.length === 0 || !props.winnerId || !camera) return
 
   const winnerIndex = active.findIndex((p) => p.id === props.winnerId)
   if (winnerIndex === -1) return
