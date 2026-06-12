@@ -1,11 +1,13 @@
 use std::env;
+use std::process::ExitCode;
+
 use tower_http::cors::{Any, CorsLayer};
 
-use wheel_of_shame::db::{AnyStore, AppState, MemoryStore, YdbStore};
 use wheel_of_shame::routes;
+use wheel_of_shame::store::{build_store_from_env, AppState};
 
 #[tokio::main]
-async fn main() {
+async fn main() -> ExitCode {
     tracing_subscriber::fmt::init();
 
     let port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
@@ -16,24 +18,28 @@ async fn main() {
         .allow_methods(Any)
         .allow_headers(Any);
 
-    let store = match env::var("YDB_CONNECTION_STRING") {
-        Ok(connection_string) => {
-            tracing::warn!("storage: YDB (experimental), connecting via YDB_CONNECTION_STRING");
-            let ydb = YdbStore::connect(&connection_string)
-                .await
-                .expect("failed to connect to YDB");
-            AnyStore::Ydb(ydb)
-        }
-        Err(_) => {
-            tracing::info!("storage: in-memory (set YDB_CONNECTION_STRING to use YDB)");
-            AnyStore::Memory(MemoryStore::default())
+    let store = match build_store_from_env().await {
+        Ok(store) => store,
+        Err(err) => {
+            tracing::error!("failed to initialize storage: {err:?}");
+            return ExitCode::FAILURE;
         }
     };
 
     let state = AppState::new(store);
     let app = routes::create_router(state).layer(cors);
 
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(listener) => listener,
+        Err(err) => {
+            tracing::error!("failed to bind {addr}: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
     tracing::info!("Server listening on {addr}");
-    axum::serve(listener, app).await.unwrap();
+    if let Err(err) = axum::serve(listener, app).await {
+        tracing::error!("server error: {err}");
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
 }

@@ -33,6 +33,7 @@ let pendingSpinResult: import('./types').SpinResult | null = null
 
 const flameCanvas = ref<HTMLCanvasElement | null>(null)
 let flameAnimId = 0
+let flameCleanup: (() => void) | null = null
 
 interface Particle {
   x: number
@@ -44,7 +45,20 @@ interface Particle {
   size: number
 }
 
+// Scanning the full canvas with getImageData on every resize is expensive;
+// the edge points only depend on the canvas size, so cache by dimensions.
+const edgePointsCache = new Map<string, [number, number][]>()
+
 function getTextEdgePoints(w: number, h: number): [number, number][] {
+  const key = `${w}x${h}`
+  const cached = edgePointsCache.get(key)
+  if (cached) return cached
+  const points = computeTextEdgePoints(w, h)
+  edgePointsCache.set(key, points)
+  return points
+}
+
+function computeTextEdgePoints(w: number, h: number): [number, number][] {
   const off = document.createElement('canvas')
   off.width = w
   off.height = h
@@ -97,7 +111,19 @@ function initFlame() {
     edgePoints = getTextEdgePoints(canvas.width, canvas.height)
   }
   resize()
-  window.addEventListener('resize', resize)
+
+  // Debounce: a window drag fires resize continuously; only recompute once it
+  // settles. Cleanup removes the listener and pending timer on unmount.
+  let resizeTimer: ReturnType<typeof setTimeout> | undefined
+  const onResize = () => {
+    clearTimeout(resizeTimer)
+    resizeTimer = setTimeout(resize, 150)
+  }
+  window.addEventListener('resize', onResize)
+  flameCleanup = () => {
+    window.removeEventListener('resize', onResize)
+    clearTimeout(resizeTimer)
+  }
 
   function spawn() {
     if (edgePoints.length === 0) return
@@ -188,6 +214,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   cancelAnimationFrame(flameAnimId)
+  flameCleanup?.()
 })
 
 watch(remoteSpinResult, (result) => {

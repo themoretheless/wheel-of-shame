@@ -1,7 +1,7 @@
 use axum::routing::{delete, get, post};
 use axum::Router;
 
-use crate::db::AppState;
+use crate::store::AppState;
 use crate::handlers;
 
 pub fn create_router(state: AppState) -> Router {

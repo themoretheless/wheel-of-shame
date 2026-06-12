@@ -4,7 +4,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 
-use crate::db::{AppState, Store};
+use crate::store::AppState;
 use crate::error::AppError;
 use crate::models::*;
 use crate::ws::SessionEvent;
