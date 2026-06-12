@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
-import WheelCanvas from './components/WheelCanvas.vue'
+import { ref, watch, onMounted, onBeforeUnmount, defineAsyncComponent } from 'vue'
+const WheelCanvas = defineAsyncComponent(() => import('./components/WheelCanvas.vue'))
 import NameList from './components/NameList.vue'
 import SpinResultModal from './components/SpinResult.vue'
 import { useSession } from './composables/useSession'
@@ -26,7 +26,7 @@ const {
 const titleInput = ref('')
 const spinning = ref(false)
 const winnerId = ref<string | null>(null)
-const wheelRef = ref<InstanceType<typeof WheelCanvas> | null>(null)
+const wheelRef = ref<{ dismissWinner: () => void } | null>(null)
 const winnerData = ref<{ id: string; name: string; remaining: number } | null>(null)
 let isLocalSpin = false
 let pendingSpinResult: import('./types').SpinResult | null = null
