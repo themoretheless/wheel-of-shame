@@ -99,6 +99,23 @@ const WHEEL_DEPTH = 0.3
 
 
 const textGeoCache = new Map<string, THREE.BufferGeometry>()
+const textWidthCache = new Map<string, number>()
+
+function measureTextWidth(text: string, size: number): number {
+  const key = `${text}_${size}`
+  const cached = textWidthCache.get(key)
+  if (cached !== undefined) return cached
+  const bb = otFont!.getPath(text, 0, 0, size).getBoundingBox()
+  const w = bb.x2 - bb.x1
+  textWidthCache.set(key, w)
+  return w
+}
+
+// Render-on-demand: skip renderer.render when nothing changed
+let needsRender = true
+function markDirty() {
+  needsRender = true
+}
 
 function getTextGeometry(text: string, size: number, depth: number): THREE.BufferGeometry | null {
   if (!otFont) return null
@@ -111,8 +128,7 @@ function getTextGeometry(text: string, size: number, depth: number): THREE.Buffe
   const otPath = otFont.getPath(text, 0, 0, size)
 
   // Get text width for centering after X-flip
-  const otBB = otFont.getPath(text, 0, 0, size).getBoundingBox()
-  const textW = otBB.x2 - otBB.x1
+  const textW = measureTextWidth(text, size)
 
   const shapePath = new THREE.ShapePath()
 
@@ -230,6 +246,7 @@ function buildWheelWithAngles(
   if (!wheelGroup) return
   clearGroup(wheelGroup)
   segmentMeshes = []
+  markDirty()
 
   if (active.length === 0) {
     const shape = new THREE.Shape()
@@ -375,6 +392,7 @@ function buildWheelWithAngles(
   })
 
   addWheelCenter()
+  markDirty()
 }
 
 function addWheelCenter() {
@@ -399,6 +417,7 @@ function animateSegmentShrink(winnerId: string, callback: () => void) {
   const startTime = performance.now()
 
   function frame(now: number) {
+    markDirty()
     const t = Math.min((now - startTime) / duration, 1)
     const eased = 1 - Math.pow(1 - t, 2)
 
@@ -479,6 +498,7 @@ function fitWheel() {
   if (controls) {
     controls.target.set(0, 0, 0)
   }
+  markDirty()
 }
 
 function handleResize() {
@@ -593,18 +613,20 @@ function createSpinButtons(): THREE.Group {
   return group
 }
 
+const clickMouse = new THREE.Vector2()
+
 function onCanvasClick(e: MouseEvent) {
   if (!renderer || !camera || isSpinAnimating) return
   if (props.spinning || props.participants.filter(p => !p.removed).length === 0) return
 
   const rect = renderer.domElement.getBoundingClientRect()
-  const mouse = new THREE.Vector2(
+  clickMouse.set(
     ((e.clientX - rect.left) / rect.width) * 2 - 1,
     -((e.clientY - rect.top) / rect.height) * 2 + 1,
   )
 
   if (!raycaster) raycaster = new THREE.Raycaster()
-  raycaster.setFromCamera(mouse, camera)
+  raycaster.setFromCamera(clickMouse, camera)
 
   if (spinBtnLeft) {
     const hits = raycaster.intersectObject(spinBtnLeft, false)
@@ -654,6 +676,7 @@ function initScene() {
   controls.maxDistance = 14
   controls.minPolarAngle = 0.3
   controls.maxPolarAngle = Math.PI - 0.3
+  controls.addEventListener('change', markDirty)
 
   scene.add(new THREE.AmbientLight(0xffffff, 0.7))
   const key = new THREE.DirectionalLight(0xffffff, 1.0)
@@ -705,6 +728,7 @@ function initScene() {
     if (font) {
       otFont = font
       textGeoCache.clear()
+      textWidthCache.clear()
       buildWheel()
     }
   })
@@ -767,6 +791,7 @@ function animateCoinDrop() {
   const startTime = performance.now()
 
   function frame(now: number) {
+    markDirty()
     const elapsed = now - startTime
     const t = Math.min(elapsed / duration, 1)
     const eased = 1 - Math.pow(1 - t, 3)
@@ -833,7 +858,8 @@ function animateCoinDrop() {
 function startRenderLoop() {
   function loop() {
     if (!renderer || !scene || !camera) return
-    if (controls) controls.update()
+    // controls.update() returns true while damping is still moving
+    if (controls && controls.update()) markDirty()
 
     // Track angular velocity for flick-to-spin
     if (controls && !isSpinAnimating && !props.spinning && flickCooldown <= 0) {
@@ -853,7 +879,10 @@ function startRenderLoop() {
       if (controls) lastAzimuth = controls.getAzimuthalAngle()
     }
 
-    renderer.render(scene, camera)
+    if (needsRender) {
+      needsRender = false
+      renderer.render(scene, camera)
+    }
     animFrameId = requestAnimationFrame(loop)
   }
   loop()
@@ -876,6 +905,7 @@ function animateWinnerReveal(
   const startTime = performance.now()
 
   function frame(now: number) {
+    markDirty()
     const t = Math.min((now - startTime) / duration, 1)
     const eased = 1 - Math.pow(1 - t, 3) * Math.cos(t * Math.PI * 2)
     seg!.position.z = startZ + 0.4 * eased
@@ -948,6 +978,7 @@ function animateSpin() {
   const startRot = currentRotation
 
   isSpinAnimating = true
+  setHoveredBtn(null)
   resetSegments()
   if (controls) controls.enabled = false
 
@@ -956,6 +987,7 @@ function animateSpin() {
   const camReturnDuration = 800
 
   function frame(now: number) {
+    markDirty()
     const elapsed = now - startTime
     const t = Math.min(elapsed / duration, 1)
     const eased = 1 - Math.pow(1 - t, 3)
@@ -1014,37 +1046,52 @@ watch(
 )
 
 // Hover effect on spin buttons
+const hoverMouse = new THREE.Vector2()
+let hoveredBtn: THREE.Mesh | null = null
+
+function setHoveredBtn(btn: THREE.Mesh | null) {
+  if (btn === hoveredBtn) return
+  if (hoveredBtn) {
+    (hoveredBtn.material as THREE.MeshStandardMaterial).emissive.set('#331111')
+  }
+  if (btn) {
+    (btn.material as THREE.MeshStandardMaterial).emissive.set('#662222')
+  }
+  hoveredBtn = btn
+  if (renderer) renderer.domElement.style.cursor = btn ? 'pointer' : 'default'
+  markDirty()
+}
+
 function onCanvasMouseMove(e: MouseEvent) {
   if (!renderer || !camera) return
+  if (props.spinning || isSpinAnimating) {
+    setHoveredBtn(null)
+    return
+  }
   const rect = renderer.domElement.getBoundingClientRect()
-  const mouse = new THREE.Vector2(
+  hoverMouse.set(
     ((e.clientX - rect.left) / rect.width) * 2 - 1,
     -((e.clientY - rect.top) / rect.height) * 2 + 1,
   )
   if (!raycaster) raycaster = new THREE.Raycaster()
-  raycaster.setFromCamera(mouse, camera)
+  raycaster.setFromCamera(hoverMouse, camera)
 
-  let hovering = false
+  let hit: THREE.Mesh | null = null
   for (const btn of [spinBtnLeft, spinBtnRight]) {
     if (!btn) continue
-    const mat = btn.material as THREE.MeshStandardMaterial
-    const hits = raycaster.intersectObject(btn, false)
-    if (hits.length > 0 && !props.spinning) {
-      mat.emissive.set('#662222')
-      hovering = true
-    } else {
-      mat.emissive.set('#331111')
+    if (raycaster.intersectObject(btn, false).length > 0) {
+      hit = btn
+      break
     }
   }
-  renderer.domElement.style.cursor = hovering ? 'pointer' : 'default'
+  setHoveredBtn(hit)
 }
 
 watch(
-  () => [props.participants, props.participants.filter((p) => !p.removed).length],
+  () => props.participants.filter((p) => !p.removed).map((p) => p.id + ':' + p.name).join('|'),
   () => {
     nextTick(() => buildWheel())
   },
-  { deep: true },
 )
 
 onMounted(() => {
