@@ -58,6 +58,23 @@ function getLineMat(): THREE.LineBasicMaterial {
   return cachedLineMat
 }
 
+// Text labels reuse one shared black material plus one per fill color, instead
+// of allocating two MeshBasicMaterials per label on every rebuild.
+let cachedTextBlackMat: THREE.MeshBasicMaterial | null = null
+const cachedTextColorMats = new Map<string, THREE.MeshBasicMaterial>()
+
+function getTextMats(color: string): [THREE.MeshBasicMaterial, THREE.MeshBasicMaterial] {
+  if (!cachedTextBlackMat) {
+    cachedTextBlackMat = new THREE.MeshBasicMaterial({ color: '#000000', side: THREE.DoubleSide })
+  }
+  let colorMat = cachedTextColorMats.get(color)
+  if (!colorMat) {
+    colorMat = new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide })
+    cachedTextColorMats.set(color, colorMat)
+  }
+  return [cachedTextBlackMat, colorMat]
+}
+
 function getCenterGroup(): THREE.Group {
   if (cachedCenterGroup) return cachedCenterGroup.clone(true)
 
@@ -89,6 +106,7 @@ function getCenterGroup(): THREE.Group {
 let currentRotation = 0
 let isSpinAnimating = false
 let segmentMeshes: THREE.Mesh[] = []
+let dividerLines: (THREE.Line | null)[] = []
 let lastAzimuth = 0
 let azimuthVelocity = 0
 let isPointerDown = false
@@ -409,12 +427,12 @@ function resetSegments() {
 function buildWheelWithAngles(
   active: { id: string; name: string }[],
   angles?: number[], // radian size per segment
-  alphas?: number[], // opacity per segment (0..1)
 ) {
   if (!wheelGroup) return
   const group: THREE.Group = wheelGroup
   clearGroup(group)
   segmentMeshes = []
+  dividerLines = []
   markDirty()
 
   if (active.length === 0) {
@@ -464,17 +482,14 @@ function buildWheelWithAngles(
       // Too small to render — skip but keep index
       cursor += segAngle
       segmentMeshes.push(null as any)
+      dividerLines.push(null)
       return
     }
     const startAngle = cursor
     cursor += segAngle
     const color = COLORS[i % COLORS.length]
-    const alpha = alphas ? alphas[i] : 1
 
-    const mat = alpha < 1
-      ? new THREE.MeshStandardMaterial({ color, metalness: 0.1, roughness: 0.55, transparent: true, opacity: alpha })
-      : getCachedMat(color, 0.1, 0.55)
-    const mesh = new THREE.Mesh(getSegmentGeometry(segAngle), mat)
+    const mesh = new THREE.Mesh(getSegmentGeometry(segAngle), getCachedMat(color, 0.1, 0.55))
     mesh.position.z = -WHEEL_DEPTH / 2
     mesh.rotation.z = startAngle
     mesh.userData.participantId = p.id
@@ -488,13 +503,12 @@ function buildWheelWithAngles(
     line.rotation.z = startAngle
     line.userData.sharedGeometry = true
     group.add(line)
+    dividerLines.push(line)
 
     const name = displayNames[i]
     const curvedGeo = getCurvedTextGeometry(name, textSize, textDepth)
     if (curvedGeo) {
-      const blackMat = new THREE.MeshBasicMaterial({ color: '#000000', side: THREE.DoubleSide })
-      const segColorMat = new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide })
-      const textMesh = new THREE.Mesh(curvedGeo, [blackMat, segColorMat])
+      const textMesh = new THREE.Mesh(curvedGeo, getTextMats(color))
       textMesh.scale.set(1 / 100, 1 / 100, 1 / 100)
       textMesh.position.z = WHEEL_DEPTH + 0.02
       // Parent segment is rotated by startAngle, so only the half-slice
@@ -519,7 +533,12 @@ function buildWheel() {
   buildWheelWithAngles(active)
 }
 
-// Animate: winner segment shrinks, others expand, then emit result
+// Animate: winner segment shrinks, others expand, then emit result.
+//
+// Updates the existing segment meshes in place (geometry + rotation) instead
+// of tearing down and rebuilding the whole wheel every frame, so the only
+// per-frame allocation is the (cache-bounded) wedge geometry for the two
+// distinct angles in flight.
 function animateSegmentShrink(winnerId: string, callback: () => void) {
   const active = props.participants.filter((p) => !p.removed)
   const winIdx = active.findIndex((p) => p.id === winnerId)
@@ -530,34 +549,71 @@ function animateSegmentShrink(winnerId: string, callback: () => void) {
   const duration = 800
   const startTime = performance.now()
 
+  // The winner's label fades out. Give it private transparent materials so
+  // mutating opacity never touches the shared cached text materials used by
+  // every other label. They are disposed when the animation completes.
+  const fadeMats: THREE.MeshBasicMaterial[] = []
+  const winMesh = segmentMeshes[winIdx]
+  if (winMesh) {
+    // Undo the lift applied by animateWinnerReveal so the winner shrinks flat.
+    winMesh.position.z = -WHEEL_DEPTH / 2
+    for (const child of winMesh.children) {
+      if (!(child instanceof THREE.Mesh)) continue
+      const orig = Array.isArray(child.material) ? child.material : [child.material]
+      const cloned = orig.map((m) => {
+        const c = (m as THREE.MeshBasicMaterial).clone()
+        c.transparent = true
+        return c
+      })
+      child.material = cloned
+      cloned.forEach((c) => fadeMats.push(c))
+    }
+  }
+
   function frame(now: number) {
     markDirty()
     const t = Math.min((now - startTime) / duration, 1)
     const eased = 1 - Math.pow(1 - t, 2)
 
-    // Winner shrinks to 0, others grow proportionally
+    // Winner shrinks to 0, others grow proportionally.
     const winAngle = baseAngle * (1 - eased)
     const extraPerOther = (baseAngle * eased) / (count - 1 || 1)
-    const angles = active.map((_, i) =>
-      i === winIdx ? winAngle : baseAngle + extraPerOther,
-    )
-    const savedRotation = wheelGroup ? wheelGroup.rotation.z : 0
-    buildWheelWithAngles(active, angles)
-    if (wheelGroup) wheelGroup.rotation.z = savedRotation
 
-    // Fade out winner's label
-    const winMesh = segmentMeshes[winIdx]
-    if (winMesh) {
-      winMesh.children.forEach((child) => {
-        if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshBasicMaterial) {
-          child.material.opacity = 1 - eased
-        }
-      })
+    let cursor = 0
+    for (let i = 0; i < count; i++) {
+      const segAngle = i === winIdx ? winAngle : baseAngle + extraPerOther
+      const startAngle = cursor
+      cursor += segAngle
+
+      const mesh = segmentMeshes[i]
+      const line = dividerLines[i]
+      if (!mesh) continue
+
+      if (segAngle < 0.005) {
+        mesh.visible = false
+        if (line) line.visible = false
+        continue
+      }
+
+      mesh.visible = true
+      mesh.geometry = getSegmentGeometry(segAngle)
+      mesh.rotation.z = startAngle
+      if (line) {
+        line.visible = true
+        line.rotation.z = startAngle
+      }
+      // Text child keeps the half-slice offset within its rotated parent.
+      for (const child of mesh.children) {
+        if (child instanceof THREE.Mesh) child.rotation.z = segAngle / 2
+      }
     }
+
+    fadeMats.forEach((m) => { m.opacity = 1 - eased })
 
     if (t < 1) {
       requestAnimationFrame(frame)
     } else {
+      fadeMats.forEach((m) => m.dispose())
       callback()
     }
   }
@@ -621,6 +677,9 @@ function handleResize() {
   const h = container.clientHeight
   camera.aspect = w / h
   camera.updateProjectionMatrix()
+  // Re-apply pixel ratio: it can change when the window moves to a monitor
+  // with a different DPI, otherwise the canvas renders blurry or oversharp.
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
   renderer.setSize(w, h)
   fitWheel()
 }
