@@ -31,6 +31,11 @@ let scene: THREE.Scene | null = null
 let camera: THREE.PerspectiveCamera | null = null
 let wheelGroup: THREE.Group | null = null
 let pointerMesh: THREE.Mesh | null = null
+let pegPivot: THREE.Group | null = null // hinge that lets the pointer flap
+let pegMeshes: THREE.Mesh[] = []
+let pegSpacing = 0 // angular gap between pegs during the active spin
+let prevPegSign = 0 // sign of the nearest-peg offset, to detect crossings
+let audioCtx: AudioContext | null = null
 let pivotGroup: THREE.Group | null = null
 let controls: OrbitControls | null = null
 let spinBtnLeft: THREE.Mesh | null = null
@@ -377,6 +382,27 @@ function getDividerGeo(): THREE.BufferGeometry {
   return sharedDividerGeo
 }
 
+// Pegs studded around the rim at each segment boundary; the pointer flaps off
+// them as the wheel turns. Geometry/material are shared across all pegs.
+let sharedPegGeo: THREE.CylinderGeometry | null = null
+let sharedPegMat: THREE.MeshStandardMaterial | null = null
+
+function getPegGeo(): THREE.CylinderGeometry {
+  if (!sharedPegGeo) {
+    // Cylinder axis is Y by default; we rotate it to point along +Z (toward
+    // the viewer) so each peg reads as a little stud on the wheel face.
+    sharedPegGeo = new THREE.CylinderGeometry(0.045, 0.055, 0.16, 12)
+  }
+  return sharedPegGeo
+}
+
+function getPegMat(): THREE.MeshStandardMaterial {
+  if (!sharedPegMat) {
+    sharedPegMat = new THREE.MeshStandardMaterial({ color: '#d0d3d4', metalness: 0.85, roughness: 0.25 })
+  }
+  return sharedPegMat
+}
+
 function measureTextWidth(text: string, size: number): number {
   if (!otFont) return 0
   const key = `${text}_${size}`
@@ -433,6 +459,7 @@ function buildWheelWithAngles(
   clearGroup(group)
   segmentMeshes = []
   dividerLines = []
+  pegMeshes = []
   markDirty()
 
   if (active.length === 0) {
@@ -505,6 +532,18 @@ function buildWheelWithAngles(
     group.add(line)
     dividerLines.push(line)
 
+    // Peg studded on the rim at this boundary; the pointer flaps off it.
+    const peg = new THREE.Mesh(getPegGeo(), getPegMat())
+    peg.rotation.x = Math.PI / 2 // point the cylinder along +Z
+    peg.position.set(
+      Math.cos(startAngle) * WHEEL_RADIUS,
+      Math.sin(startAngle) * WHEEL_RADIUS,
+      WHEEL_DEPTH / 2 + 0.05,
+    )
+    peg.userData.sharedGeometry = true
+    group.add(peg)
+    pegMeshes.push(peg)
+
     const name = displayNames[i]
     const curvedGeo = getCurvedTextGeometry(name, textSize, textDepth)
     if (curvedGeo) {
@@ -548,6 +587,10 @@ function animateSegmentShrink(winnerId: string, callback: () => void) {
   const baseAngle = (Math.PI * 2) / count
   const duration = 800
   const startTime = performance.now()
+
+  // Pegs sit at the original boundaries; hide them while the segments slide to
+  // new angles in place (buildWheel re-creates them afterward).
+  for (const peg of pegMeshes) peg.visible = false
 
   // The winner's label fades out. Give it private transparent materials so
   // mutating opacity never touches the shared cached text materials used by
@@ -635,8 +678,8 @@ function fitWheel() {
   const availW = vw - MENU_WIDTH - PADDING * 2
   const availH = vh - PADDING * 2
 
-  // World size of wheel (diameter + pointer + margin)
-  const wheelWorld = (WHEEL_RADIUS + 0.3) * 2
+  // World size of wheel (diameter + hinged pointer + margin)
+  const wheelWorld = (WHEEL_RADIUS + 0.6) * 2
 
   // At BASE_CAM_Z, how much world space is visible?
   const vFov = (CAM_FOV * Math.PI) / 180
@@ -871,16 +914,25 @@ function initScene() {
   wheelGroup = new THREE.Group()
   pivotGroup.add(wheelGroup)
 
+  // Pointer is a flapper hinged above the rim. Its geometry hangs down from a
+  // pivot at the local origin so rotating pegPivot.rotation.z swings the tip
+  // sideways, letting it bounce off the pegs as the wheel turns.
   const pShape = new THREE.Shape()
-  pShape.moveTo(0, -0.05)
-  pShape.lineTo(-0.18, 0.4)
-  pShape.lineTo(0.18, 0.4)
-  pShape.lineTo(0, -0.05)
+  pShape.moveTo(0, -0.5) // tip, reaches the rim where the pegs are
+  pShape.lineTo(-0.14, -0.02)
+  pShape.lineTo(-0.1, 0.08)
+  pShape.lineTo(0.1, 0.08)
+  pShape.lineTo(0.14, -0.02)
+  pShape.lineTo(0, -0.5)
   const pGeo = new THREE.ExtrudeGeometry(pShape, { depth: 0.15, bevelEnabled: false })
   const pMat = new THREE.MeshStandardMaterial({ color: '#e74c3c', metalness: 0.25, roughness: 0.4 })
   pointerMesh = new THREE.Mesh(pGeo, pMat)
-  pointerMesh.position.set(0, WHEEL_RADIUS + 0.15, 0.3)
-  pivotGroup.add(pointerMesh)
+  pointerMesh.position.z = 0.3
+
+  pegPivot = new THREE.Group()
+  pegPivot.position.set(0, WHEEL_RADIUS + 0.5, 0)
+  pegPivot.add(pointerMesh)
+  pivotGroup.add(pegPivot)
 
   // 3D spin buttons (left / right)
   const spinBtns = createSpinButtons()
@@ -1110,6 +1162,89 @@ function dismissWinner() {
 
 defineExpose({ dismissWinner })
 
+// Short percussive click synthesised on each peg strike. Created lazily on the
+// first tick — the spin is click-initiated, so the audio context is allowed to
+// start. Volume rises toward the finale for tension.
+function playTick(volume: number) {
+  try {
+    if (!audioCtx) {
+      const Ctor = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
+      audioCtx = new Ctor()
+    }
+    const ctx = audioCtx
+    if (ctx.state === 'suspended') ctx.resume()
+    const now = ctx.currentTime
+    const osc = ctx.createOscillator()
+    const gain = ctx.createGain()
+    osc.type = 'triangle'
+    osc.frequency.setValueAtTime(1100 + Math.random() * 300, now)
+    osc.frequency.exponentialRampToValueAtTime(520, now + 0.03)
+    gain.gain.setValueAtTime(0.0001, now)
+    gain.gain.exponentialRampToValueAtTime(Math.max(0.0002, volume), now + 0.004)
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.05)
+    osc.connect(gain).connect(ctx.destination)
+    osc.start(now)
+    osc.stop(now + 0.06)
+  } catch {
+    // Audio unavailable — silently skip.
+  }
+}
+
+// Swing the pointer off the nearest peg and tick when a peg crosses the tip.
+// `intensity` (0..1) grows toward the finale, scaling the kick and volume.
+function updateFlapper(intensity: number) {
+  if (!pegPivot || pegSpacing <= 0) return
+
+  // Offset of the nearest peg from the top pointer, in (-spacing/2, spacing/2].
+  const q = (Math.PI / 2 - currentRotation) / pegSpacing
+  const m = (q - Math.round(q)) * pegSpacing
+  const dir = spinDirection
+  const contact = Math.min(0.16, pegSpacing * 0.45)
+  const maxDeflect = 0.28 + 0.22 * intensity
+
+  // Deflect while the incoming peg is under the tip; snap back once it passes.
+  let deflect = 0
+  if (m * dir > 0 && Math.abs(m) < contact) {
+    deflect = (1 - Math.abs(m) / contact) * maxDeflect
+  }
+  pegPivot.rotation.z = -dir * deflect
+
+  // Tick only on a crossing of the tip itself (m through 0), not on the
+  // half-way handover between pegs (m near ±spacing/2).
+  const sign = m >= 0 ? 1 : -1
+  if (prevPegSign !== 0 && sign !== prevPegSign && Math.abs(m) < pegSpacing * 0.3) {
+    playTick(0.04 + 0.16 * intensity)
+  }
+  prevPegSign = sign
+}
+
+// Moderate "tip-over": after the wheel lands it rocks slightly past the final
+// peg and settles back, selling the last bit of momentum.
+function animateSettle(target: number, onDone: () => void) {
+  const dir = spinDirection
+  const amp = pegSpacing > 0 ? Math.min(0.1, pegSpacing * 0.18) : 0.08
+  const duration = 420
+  const startTime = performance.now()
+  function frame(now: number) {
+    markDirty()
+    const t = Math.min((now - startTime) / duration, 1)
+    const decay = Math.pow(1 - t, 2)
+    const offset = dir * amp * decay * Math.sin(t * Math.PI * 3)
+    currentRotation = target + offset
+    if (wheelGroup) wheelGroup.rotation.z = currentRotation
+    updateFlapper(1)
+    if (t < 1) {
+      requestAnimationFrame(frame)
+    } else {
+      currentRotation = target
+      if (wheelGroup) wheelGroup.rotation.z = target
+      if (pegPivot) pegPivot.rotation.z = 0
+      onDone()
+    }
+  }
+  requestAnimationFrame(frame)
+}
+
 function animateSpin() {
   const active = props.participants.filter((p) => !p.removed)
   if (active.length === 0 || !props.winnerId || !camera) return
@@ -1140,6 +1275,8 @@ function animateSpin() {
   isSpinAnimating = true
   setHoveredBtn(null)
   resetSegments()
+  pegSpacing = sliceAngle
+  prevPegSign = 0
   if (controls) controls.enabled = false
 
   const camFrom = camera.position.clone()
@@ -1156,6 +1293,7 @@ function animateSpin() {
     if (wheelGroup) {
       wheelGroup.rotation.z = currentRotation
     }
+    updateFlapper(t)
 
     if (camera && elapsed < camReturnDuration) {
       const ct = Math.min(elapsed / camReturnDuration, 1)
@@ -1170,26 +1308,29 @@ function animateSpin() {
     if (t < 1) {
       requestAnimationFrame(frame)
     } else {
-      isSpinAnimating = false
-      azimuthVelocity = 0
-      flickCooldown = 120
-      if (controls) {
-        controls.update()
-        controls.enabled = true
-        lastAzimuth = controls.getAzimuthalAngle()
-      }
+      // Land, then rock over the last peg before revealing the winner.
+      animateSettle(startRot + totalRotation, () => {
+        isSpinAnimating = false
+        azimuthVelocity = 0
+        flickCooldown = 120
+        if (controls) {
+          controls.update()
+          controls.enabled = true
+          lastAzimuth = controls.getAzimuthalAngle()
+        }
 
-      const winner = active.find((p) => p.id === props.winnerId)
-      const remaining = active.length - 1
+        const winner = active.find((p) => p.id === props.winnerId)
+        const remaining = active.length - 1
 
-      animateWinnerReveal(
-        props.winnerId!,
-        winner?.name ?? '???',
-        remaining,
-        () => {
-          emit('spin-complete', props.winnerId!)
-        },
-      )
+        animateWinnerReveal(
+          props.winnerId!,
+          winner?.name ?? '???',
+          remaining,
+          () => {
+            emit('spin-complete', props.winnerId!)
+          },
+        )
+      })
     }
   }
 
@@ -1269,7 +1410,14 @@ onBeforeUnmount(() => {
   segGeoCache.clear()
   cachedMaterials.forEach((m) => m.dispose())
   cachedMaterials.clear()
+  cachedTextColorMats.forEach((m) => m.dispose())
+  cachedTextColorMats.clear()
+  if (cachedTextBlackMat) cachedTextBlackMat.dispose()
+  if (cachedLineMat) cachedLineMat.dispose()
   if (sharedDividerGeo) sharedDividerGeo.dispose()
+  if (sharedPegGeo) sharedPegGeo.dispose()
+  if (sharedPegMat) sharedPegMat.dispose()
+  if (audioCtx) audioCtx.close().catch(() => {})
   if (controls) controls.dispose()
   if (renderer) {
     renderer.domElement.remove()
