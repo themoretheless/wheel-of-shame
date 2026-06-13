@@ -47,13 +47,19 @@ interface Particle {
 
 // Scanning the full canvas with getImageData on every resize is expensive;
 // the edge points only depend on the canvas size, so cache by dimensions.
+// Bounded: a long session with many window sizes would otherwise keep every
+// point array forever.
 const edgePointsCache = new Map<string, [number, number][]>()
+const EDGE_POINTS_CACHE_LIMIT = 12
 
 function getTextEdgePoints(w: number, h: number): [number, number][] {
   const key = `${w}x${h}`
   const cached = edgePointsCache.get(key)
   if (cached) return cached
   const points = computeTextEdgePoints(w, h)
+  if (edgePointsCache.size >= EDGE_POINTS_CACHE_LIMIT) {
+    edgePointsCache.delete(edgePointsCache.keys().next().value!)
+  }
   edgePointsCache.set(key, points)
   return points
 }

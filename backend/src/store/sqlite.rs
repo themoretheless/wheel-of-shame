@@ -7,11 +7,12 @@
 //! file.
 
 use std::str::FromStr;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rand::prelude::IndexedRandom;
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow};
 use sqlx::{Row, SqlitePool};
 
 use crate::error::AppError;
@@ -48,14 +49,33 @@ impl SqliteStore {
     /// e.g. `sqlite://wheel.db` or `sqlite::memory:`. Creates the schema on
     /// first connection.
     pub async fn connect(url: &str) -> Result<Self, AppError> {
-        let opts = SqliteConnectOptions::from_str(url)
+        // Every connection to `:memory:` opens its own private empty database,
+        // so a multi-connection pool would run queries against databases that
+        // never saw init_schema. Pin in-memory databases to a single
+        // never-expiring connection.
+        let is_memory = url.contains(":memory:");
+
+        let mut opts = SqliteConnectOptions::from_str(url)
             .map_err(db_err)?
-            .create_if_missing(true);
-        let pool = SqlitePoolOptions::new()
-            .max_connections(5)
-            .connect_with(opts)
-            .await
-            .map_err(db_err)?;
+            .create_if_missing(true)
+            .busy_timeout(Duration::from_secs(5));
+        if !is_memory {
+            // WAL lets readers proceed while a writer commits and avoids the
+            // rollback-journal deadlock between two write transactions that
+            // both hold shared read locks.
+            opts = opts.journal_mode(SqliteJournalMode::Wal);
+        }
+
+        let mut pool_opts = SqlitePoolOptions::new();
+        if is_memory {
+            pool_opts = pool_opts
+                .max_connections(1)
+                .idle_timeout(None)
+                .max_lifetime(None);
+        } else {
+            pool_opts = pool_opts.max_connections(5);
+        }
+        let pool = pool_opts.connect_with(opts).await.map_err(db_err)?;
 
         let store = Self { pool };
         store.init_schema().await?;
@@ -68,6 +88,21 @@ impl SqliteStore {
         let store = Self { pool };
         store.init_schema().await?;
         Ok(store)
+    }
+
+    /// Begin a write transaction that takes the write lock upfront.
+    ///
+    /// A deferred (default) transaction that reads first and writes later
+    /// cannot upgrade its read snapshot if another writer committed in
+    /// between — SQLite fails the write immediately with SQLITE_BUSY and
+    /// busy_timeout does not apply. BEGIN IMMEDIATE serializes writers at
+    /// the start instead: the second writer waits (honoring busy_timeout)
+    /// and then reads the already-updated state.
+    async fn begin_write(&self) -> Result<sqlx::Transaction<'static, sqlx::Sqlite>, AppError> {
+        self.pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(db_err)
     }
 
     async fn init_schema(&self) -> Result<(), AppError> {
@@ -159,7 +194,7 @@ impl Store for SqliteStore {
         session_id: &str,
         participants: &[Participant],
     ) -> Result<(), AppError> {
-        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        let mut tx = self.begin_write().await?;
 
         let exists = sqlx::query("SELECT 1 FROM sessions WHERE id = ?")
             .bind(session_id)
@@ -196,7 +231,7 @@ impl Store for SqliteStore {
         session_id: &str,
         participant_id: &str,
     ) -> Result<(), AppError> {
-        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        let mut tx = self.begin_write().await?;
 
         let session = sqlx::query("SELECT 1 FROM sessions WHERE id = ?")
             .bind(session_id)
@@ -224,7 +259,7 @@ impl Store for SqliteStore {
     }
 
     async fn spin(&self, session_id: &str) -> Result<SpinResult, AppError> {
-        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        let mut tx = self.begin_write().await?;
 
         let session = sqlx::query("SELECT 1 FROM sessions WHERE id = ?")
             .bind(session_id)
@@ -275,7 +310,7 @@ impl Store for SqliteStore {
     }
 
     async fn reset_session(&self, session_id: &str) -> Result<Vec<Participant>, AppError> {
-        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        let mut tx = self.begin_write().await?;
 
         let session = sqlx::query("SELECT 1 FROM sessions WHERE id = ?")
             .bind(session_id)
