@@ -28,11 +28,31 @@ const {
 const titleInput = ref('')
 const spinning = ref(false)
 const winnerId = ref<string | null>(null)
-const wheelRef = ref<{ dismissWinner: () => void; resetView: () => void } | null>(null)
+const wheelRef = ref<{
+  dismissWinner: () => void
+  resetView: () => void
+  isMuted: { value: boolean }
+  toggleMute: () => void
+} | null>(null)
 const winnerData = ref<{ id: string; name: string; remaining: number } | null>(null)
 // True while the orbit camera has been dragged off its resting framing; drives
 // the Snap-home reset pill below the header.
 const cameraDrifted = ref(false)
+// Mirror of WheelCanvas's persisted spin-sound mute flag, seeded from the same
+// localStorage key so the dock button shows the right state before the canvas
+// mounts. The toggle below drives the canvas, which owns persistence.
+const soundMuted = ref(readMutedPref())
+function readMutedPref(): boolean {
+  try {
+    return localStorage.getItem('wheel-muted') === '1'
+  } catch {
+    return false
+  }
+}
+function toggleSound() {
+  wheelRef.value?.toggleMute()
+  soundMuted.value = wheelRef.value?.isMuted.value ?? !soundMuted.value
+}
 let isLocalSpin = false
 let pendingSpinResult: import('./types').SpinResult | null = null
 
@@ -362,6 +382,14 @@ const paletteCommands = computed<Command[]>(() => [
       copyLink()
     },
   },
+  {
+    id: 'toggle-sound',
+    label: soundMuted.value ? 'Unmute spin sound' : 'Mute spin sound',
+    hint: soundMuted.value ? 'Unmute' : 'Mute',
+    run: () => {
+      toggleSound()
+    },
+  },
   // One spotlight command per active participant: type a name into Cmd-K and
   // the fuzzy scorer floats the match to the top, then Enter eliminates them.
   ...activeParticipants.value.map((p): Command => {
@@ -498,6 +526,37 @@ function onGlobalKeydown(e: KeyboardEvent) {
         </button>
         <button @click="copyLink" class="btn btn-small" title="Copy share link">
           Share
+        </button>
+        <button
+          @click="toggleSound"
+          class="btn btn-small dock-mute"
+          :title="soundMuted ? 'Unmute spin sound' : 'Mute spin sound'"
+          :aria-pressed="soundMuted"
+        >
+          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+            <path
+              d="M3 9v6h4l5 5V4L7 9H3z"
+              fill="currentColor"
+            />
+            <template v-if="soundMuted">
+              <path
+                d="M16 9l6 6M22 9l-6 6"
+                stroke="currentColor"
+                stroke-width="2"
+                fill="none"
+                stroke-linecap="round"
+              />
+            </template>
+            <template v-else>
+              <path
+                d="M16 8.5a5 5 0 0 1 0 7"
+                stroke="currentColor"
+                stroke-width="2"
+                fill="none"
+                stroke-linecap="round"
+              />
+            </template>
+          </svg>
         </button>
         <button
           @click="paletteOpen = true"
@@ -797,6 +856,11 @@ function onGlobalKeydown(e: KeyboardEvent) {
 .dock-spin {
   color: #4ECDC4;
   font-weight: bold;
+}
+
+/* Muted state dims the speaker glyph so the slash reads as "off" at a glance. */
+.dock-mute[aria-pressed='true'] {
+  color: rgba(223, 230, 233, 0.5);
 }
 
 .dock-kbd {

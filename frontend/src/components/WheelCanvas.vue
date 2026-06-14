@@ -26,6 +26,27 @@ const emit = defineEmits<{
 
 const containerRef = ref<HTMLDivElement | null>(null)
 
+// Spin sound: a rising peg tick (playTick) ramping into a low thunk on landing
+// (playThunk). Muting is persisted so the preference survives reloads, and is
+// surfaced to the parent through isMuted/toggleMute for the action-dock button.
+const MUTE_KEY = 'wheel-muted'
+function readMuted(): boolean {
+  try {
+    return typeof localStorage !== 'undefined' && localStorage.getItem(MUTE_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+const isMuted = ref(readMuted())
+function toggleMute() {
+  isMuted.value = !isMuted.value
+  try {
+    localStorage.setItem(MUTE_KEY, isMuted.value ? '1' : '0')
+  } catch {
+    // Persistence unavailable (private mode / blocked) — keep the in-memory flag.
+  }
+}
+
 let renderer: THREE.WebGLRenderer | null = null
 let composer: EffectComposer | null = null
 let scene: THREE.Scene | null = null
@@ -1403,12 +1424,13 @@ function resetView() {
   requestAnimationFrame(frame)
 }
 
-defineExpose({ dismissWinner, resetView })
+defineExpose({ dismissWinner, resetView, isMuted, toggleMute })
 
 // Short percussive click synthesised on each peg strike. Created lazily on the
 // first tick — the spin is click-initiated, so the audio context is allowed to
 // start. Volume rises toward the finale for tension.
 function playTick(volume: number) {
+  if (isMuted.value) return
   try {
     if (!audioCtx) {
       const Ctor = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
@@ -1428,6 +1450,38 @@ function playTick(volume: number) {
     osc.connect(gain).connect(ctx.destination)
     osc.start(now)
     osc.stop(now + 0.06)
+  } catch {
+    // Audio unavailable — silently skip.
+  }
+}
+
+// Low detuned "thunk" played once when the wheel lands, closing the rising
+// peg-tick sequence with a heavier settle. Two slightly detuned oscillators
+// beat against each other for a thicker body than the single-osc tick.
+function playThunk() {
+  if (isMuted.value) return
+  try {
+    if (!audioCtx) {
+      const Ctor = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
+      audioCtx = new Ctor()
+    }
+    const ctx = audioCtx
+    if (ctx.state === 'suspended') ctx.resume()
+    const now = ctx.currentTime
+    const gain = ctx.createGain()
+    gain.gain.setValueAtTime(0.0001, now)
+    gain.gain.exponentialRampToValueAtTime(0.22, now + 0.008)
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.32)
+    gain.connect(ctx.destination)
+    for (const detune of [0, 7]) {
+      const osc = ctx.createOscillator()
+      osc.type = 'sine'
+      osc.frequency.setValueAtTime(190 + detune, now)
+      osc.frequency.exponentialRampToValueAtTime(70 + detune, now + 0.18)
+      osc.connect(gain)
+      osc.start(now)
+      osc.stop(now + 0.34)
+    }
   } catch {
     // Audio unavailable — silently skip.
   }
@@ -1625,6 +1679,10 @@ function animateSpin() {
           },
         )
       }
+
+      // Heavy settle thunk at the instant the wheel reaches its landing peg —
+      // both when it snaps (reduced motion) and when the rock-over begins.
+      playThunk()
 
       if (reducedMotion) {
         // Snap to the final angle and reveal, no rock-over-the-last-peg.
