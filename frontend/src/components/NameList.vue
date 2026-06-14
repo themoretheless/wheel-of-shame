@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import type { Participant } from '../types'
 import { identityColor } from '../utils/identity'
 import { parsePastedNames } from '../utils/roster'
@@ -35,6 +35,63 @@ const props = defineProps<{
 const oddsPct = computed(() =>
   props.active.length > 0 ? 100 / props.active.length : 0,
 )
+
+// Survivor-odds roll-up: the per-row "n%" label is shown from displayOdds, a
+// rAF-tweened mirror of oddsPct, so adding or ejecting a name rolls the number
+// up/down to its new value in lockstep with the --odds-width bar's 0.3s ease
+// rather than snapping. Every active row shares the same equal split, so one
+// tweened number drives them all. Reduced motion lands on the value at once.
+const displayOdds = ref(oddsPct.value)
+let oddsRaf = 0
+
+function prefersReducedMotion(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+  )
+}
+
+function tweenOdds(target: number) {
+  if (oddsRaf) cancelAnimationFrame(oddsRaf)
+  if (prefersReducedMotion()) {
+    displayOdds.value = target
+    return
+  }
+  const from = displayOdds.value
+  const delta = target - from
+  if (Math.abs(delta) < 0.05) {
+    displayOdds.value = target
+    return
+  }
+  // Match the bar's cubic-bezier(0.4, 0, 0.2, 1) / 0.3s feel with a cubic ease.
+  const duration = 300
+  const start = performance.now()
+  const step = (now: number) => {
+    const t = Math.min(1, (now - start) / duration)
+    const eased = 1 - Math.pow(1 - t, 3)
+    displayOdds.value = from + delta * eased
+    if (t < 1) {
+      oddsRaf = requestAnimationFrame(step)
+    } else {
+      displayOdds.value = target
+      oddsRaf = 0
+    }
+  }
+  oddsRaf = requestAnimationFrame(step)
+}
+
+watch(oddsPct, (next) => tweenOdds(next))
+
+onBeforeUnmount(() => {
+  if (oddsRaf) cancelAnimationFrame(oddsRaf)
+})
+
+// Rounded label for the odds readout; sub-1% rosters still show "1%" rather
+// than "0%" so a huge roster never reads as no chance at all.
+const oddsLabel = computed(() => {
+  const v = displayOdds.value
+  return v > 0 && v < 1 ? '1%' : `${Math.round(v)}%`
+})
 
 // Last one standing: once at least one name has been picked and a single active
 // row remains, that row is crowned the survivor (a gold-trimmed counterpart to
@@ -212,14 +269,23 @@ function addName() {
               Survivor
             </span>
           </span>
-          <button
-            v-if="!p.pending"
-            @click="emit('remove', p.id)"
-            class="btn btn-remove"
-            title="Remove"
-          >
-            &times;
-          </button>
+          <span class="row-end">
+            <!-- Odds readout: each active name's equal chance of being picked
+                 next, rolled to its new value as the roster changes. Hidden on
+                 pending/error rows, which carry no odds (their bar is hidden
+                 too). -->
+            <span v-if="!p.pending && !p.error" class="odds-pct" aria-hidden="true">{{
+              oddsLabel
+            }}</span>
+            <button
+              v-if="!p.pending"
+              @click="emit('remove', p.id)"
+              class="btn btn-remove"
+              title="Remove"
+            >
+              &times;
+            </button>
+          </span>
         </li>
       </TransitionGroup>
       <p v-if="active.length > 0 && filterMatchCount === 0" class="filter-empty">
@@ -505,6 +571,31 @@ ol {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Right cluster: the rolled odds readout next to the remove control, kept above
+   the odds bar fill so the percentage stays legible. */
+.row-end {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Per-row odds label: the tweened "n%" chance of being picked next. Tinted to
+   the same identity color as the row's odds bar via --odds-color, with tabular
+   figures so the digits don't jitter as the number rolls. */
+.odds-pct {
+  font-size: 12px;
+  font-weight: bold;
+  font-variant-numeric: tabular-nums;
+  color: var(--odds-color, #95a5a6);
+  opacity: 0.85;
+}
+
+.participant-item.ticking .odds-pct {
+  opacity: 1;
 }
 
 /* Round identity token: deterministic per-name color matching the wheel
