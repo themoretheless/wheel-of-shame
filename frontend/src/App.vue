@@ -70,6 +70,12 @@ let pendingSpinResult: import('./types').SpinResult | null = null
 const flameCanvas = ref<HTMLCanvasElement | null>(null)
 let flameAnimId = 0
 let flameCleanup: (() => void) | null = null
+// Timestamp (performance.now ms) until which the title flame flares hotter:
+// set on a winner reveal so the header briefly surges brighter and larger in
+// sympathy with the result, then decays back to its idle blaze. Read inside
+// the flame loop; module-level so onWinnerReveal can poke it.
+let flareUntil = 0
+const FLARE_MS = 900
 
 interface Particle {
   x: number
@@ -80,6 +86,9 @@ interface Particle {
   maxLife: number
   size: number
   drift?: boolean
+  // Flare strength (0..1) captured at spawn time; biases this ember brighter
+  // and whiter so a winner-reveal surge reads hotter than the idle blaze.
+  flare?: number
 }
 
 // Scanning the full canvas with getImageData on every resize is expensive;
@@ -184,9 +193,21 @@ function initFlame() {
     && window.matchMedia('(prefers-reduced-motion: reduce)').matches
   const spawnPerFrame = reducedMotion ? 1 : 4
 
+  // 0 at rest, ramping to 1 right after a reveal and easing back to 0 across
+  // FLARE_MS. Reduced motion stays calm, so the flare never kicks in there.
+  function flareStrength(): number {
+    if (reducedMotion) return 0
+    const remain = flareUntil - performance.now()
+    if (remain <= 0) return 0
+    return Math.min(1, remain / FLARE_MS)
+  }
+
   function spawn() {
     if (edgePoints.length === 0) return
-    for (let i = 0; i < spawnPerFrame; i++) {
+    // During a flare, throw off up to ~2.5x the embers and start them larger.
+    const flare = flareStrength()
+    const count = Math.round(spawnPerFrame * (1 + flare * 1.5))
+    for (let i = 0; i < count; i++) {
       const pt = edgePoints[Math.floor(Math.random() * edgePoints.length)]
       // ~2% of embers break loose and drift down past the header into the
       // wheel region: a gentle downward drift and a much longer life so they
@@ -200,8 +221,9 @@ function initFlame() {
         vy: drifter ? 0.3 + Math.random() * 0.5 : -(0.8 + Math.random() * 1.8),
         life: 0,
         maxLife: drifter ? 160 + Math.random() * 80 : 20 + Math.random() * 30,
-        size: 4 + Math.random() * 10,
+        size: (4 + Math.random() * 10) * (1 + flare * 0.6),
         drift: drifter,
+        flare,
       })
     }
   }
@@ -249,8 +271,16 @@ function initFlame() {
         r = 135 - st * 80; g = st * 20; b = st * 20
       }
 
+      // Flare bias: pull the cooler channels up toward white-hot so a reveal
+      // surge glows brighter, scaled by the strength captured at spawn time.
+      const f = p.flare ?? 0
+      if (f > 0) {
+        g += (255 - g) * 0.6 * f
+        b += (200 - b) * 0.6 * f
+      }
+
       ctx.save()
-      ctx.globalAlpha = alpha * 0.8
+      ctx.globalAlpha = Math.min(1, alpha * (0.8 + 0.25 * f))
       ctx.translate(p.x, p.y)
 
       const s = p.size
@@ -340,6 +370,8 @@ async function handleSpin() {
 
 function onWinnerReveal(data: { id: string; name: string; remaining: number }) {
   winnerData.value = data
+  // Kick the title flame into a brief hotter flare in sympathy with the reveal.
+  flareUntil = performance.now() + FLARE_MS
 }
 
 function onCameraDrifted(drifted: boolean) {
