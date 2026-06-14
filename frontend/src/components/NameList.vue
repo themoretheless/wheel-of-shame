@@ -31,6 +31,23 @@ const emit = defineEmits<{
 
 const nameInput = ref('')
 
+// Roster filter: rows that don't match stay in the DOM (so the odds bars keep
+// splitting evenly across every active name) but get a '.dimmed' class. Empty
+// query matches everything.
+const filterQuery = ref('')
+
+const matchesFilter = computed(() => {
+  const q = filterQuery.value.trim().toLowerCase()
+  return (p: Participant): boolean =>
+    q.length === 0 || p.name.toLowerCase().includes(q)
+})
+
+// Count of active rows surfaced by the current filter, for the empty-result hint.
+const filterMatchCount = computed(() => {
+  const match = matchesFilter.value
+  return props.active.reduce((n, p) => (match(p) ? n + 1 : n), 0)
+})
+
 // A ready-made roster offered on the empty state so a first-time session can be
 // populated in one click; routed through the same add-batch path as typed input.
 const SAMPLE_NAMES = ['Ada', 'Alan', 'Grace', 'Linus', 'Margaret', 'Dennis']
@@ -72,6 +89,25 @@ function addName() {
 
     <div class="participants">
       <h3>Active ({{ active.length }})</h3>
+      <!-- Roster filter: dims non-matching rows without removing them, so the
+           odds bars keep splitting across every active name. -->
+      <div v-if="active.length > 0" class="filter-group">
+        <input
+          v-model="filterQuery"
+          placeholder="Filter names…"
+          class="filter-input"
+          aria-label="Filter active names"
+        />
+        <button
+          v-if="filterQuery"
+          @click="filterQuery = ''"
+          class="filter-clear"
+          title="Clear filter"
+          aria-label="Clear filter"
+        >
+          &times;
+        </button>
+      </div>
       <!-- Physical eject: when a name leaves the active list (picked by a spin
            or removed by hand) the row slides out and blurs away while the rows
            below slide up to fill the gap, instead of vanishing instantly. -->
@@ -80,7 +116,12 @@ function addName() {
           v-for="p in active"
           :key="p.id"
           class="participant-item"
-          :class="{ pending: p.pending, error: p.error, ticking: p.id === tickingId }"
+          :class="{
+            pending: p.pending,
+            error: p.error,
+            ticking: p.id === tickingId,
+            dimmed: !matchesFilter(p),
+          }"
           :style="{
             '--odds-width': oddsPct + '%',
             '--odds-color': identityColor(p.name),
@@ -103,7 +144,10 @@ function addName() {
           </button>
         </li>
       </TransitionGroup>
-      <div v-else class="empty-card">
+      <p v-if="active.length > 0 && filterMatchCount === 0" class="filter-empty">
+        No active names match “{{ filterQuery.trim() }}”.
+      </p>
+      <div v-else-if="active.length === 0" class="empty-card">
         <span class="empty-mark" aria-hidden="true">○</span>
         <p class="empty-title">No one's on the wheel yet</p>
         <p class="empty-sub">Add names above, or drop in a sample roster to try a spin.</p>
@@ -153,6 +197,51 @@ function addName() {
 .name-input:focus {
   border-color: #4ECDC4;
   outline: none;
+}
+
+/* Roster filter field: sits between the Active heading and the list. */
+.filter-group {
+  position: relative;
+  margin-bottom: 8px;
+}
+
+.filter-input {
+  width: 100%;
+  padding: 7px 28px 7px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  font-size: 13px;
+  background: rgba(255, 255, 255, 0.05);
+  color: #dfe6e9;
+  box-sizing: border-box;
+}
+
+.filter-input::placeholder {
+  color: #7f8c8d;
+}
+
+.filter-input:focus {
+  border-color: #4ECDC4;
+  outline: none;
+}
+
+.filter-clear {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  padding: 2px 6px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #95a5a6;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.filter-clear:hover {
+  color: #dfe6e9;
 }
 
 .btn {
@@ -284,6 +373,14 @@ ol {
   text-decoration: line-through;
 }
 
+/* Filtered out: the row stays in the DOM (so odds bars stay correct) but recedes
+   so the matching rows read clearly. A ticking row overrides this to stay lit. */
+.participant-item.dimmed:not(.ticking) {
+  opacity: 0.32;
+  filter: grayscale(0.4);
+  transition: opacity 0.18s ease, filter 0.18s ease;
+}
+
 /* Spin spotlight: while a participant's wheel segment is under the pointer, its
    roster row briefly lifts and glows in the participant's identity color, so the
    list reads the spin in sync with the wheel. The class is toggled on/off as the
@@ -378,6 +475,15 @@ ol {
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.04);
   border: 1px dashed rgba(255, 255, 255, 0.12);
+}
+
+/* Shown when a filter query excludes every active row. */
+.filter-empty {
+  margin: 4px 0 0;
+  padding: 12px;
+  text-align: center;
+  font-size: 12px;
+  color: #95a5a6;
 }
 
 .empty-mark {
