@@ -223,9 +223,27 @@ onBeforeUnmount(() => {
   flameCleanup?.()
 })
 
+// A SpinResult from another client: drive the wheel to that winner with the
+// same animation as a local spin, instead of jumping to the result. The picked
+// participant is still active in activeParticipants (useSession defers the
+// removal), so animateSpin can land on its segment; applySpinResult marks it
+// removed on spin-complete.
 watch(remoteSpinResult, (result) => {
-  if (!result || isLocalSpin) return
-  remoteSpinResult.value = null
+  if (!result) return
+  // Ignore our own spin (handled by the local path) and don't interrupt an
+  // animation already in flight; apply the latter directly so it isn't lost.
+  if (isLocalSpin) {
+    remoteSpinResult.value = null
+    return
+  }
+  if (spinning.value) {
+    applySpinResult(result)
+    remoteSpinResult.value = null
+    return
+  }
+  pendingSpinResult = result
+  winnerId.value = result.picked.id
+  spinning.value = true
 })
 
 async function createSession() {

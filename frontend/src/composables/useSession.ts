@@ -124,10 +124,11 @@ ws.onMessage((event: any) => {
         suppressWsSpin = false
         break
       }
-      const idx = participants.value.findIndex((p) => p.id === event.picked.id)
-      if (idx !== -1) {
-        participants.value[idx] = event.picked
-      }
+      // Surface the result so App.vue can drive the wheel animation to this
+      // winner. Don't mark the picked participant removed yet: it must stay in
+      // activeParticipants until the spin lands, or the wheel would jump to the
+      // post-removal state. App.vue applies the removal on animation complete
+      // via applySpinResult().
       remoteSpinResult.value = {
         picked: event.picked,
         remaining: event.remaining,
