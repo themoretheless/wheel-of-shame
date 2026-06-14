@@ -5,6 +5,7 @@ export interface UseWebSocket {
   connect: (sessionId: string) => void
   disconnect: () => void
   onMessage: (handler: (event: any) => void) => void
+  onOpen: (handler: () => void) => void
   onUnexpectedClose: (handler: () => void) => void
 }
 
@@ -28,6 +29,7 @@ export function useWebSocket(): UseWebSocket {
   const connected = ref(false)
   let ws: WebSocket | null = null
   let messageHandler: ((event: any) => void) | null = null
+  let openHandler: (() => void) | null = null
   let closeHandler: (() => void) | null = null
 
   function getWsUrl(sessionId: string): string {
@@ -46,6 +48,7 @@ export function useWebSocket(): UseWebSocket {
 
     ws.onopen = () => {
       connected.value = true
+      openHandler?.()
     }
 
     ws.onclose = () => {
@@ -84,9 +87,13 @@ export function useWebSocket(): UseWebSocket {
     messageHandler = handler
   }
 
+  function onOpen(handler: () => void) {
+    openHandler = handler
+  }
+
   function onUnexpectedClose(handler: () => void) {
     closeHandler = handler
   }
 
-  return { connected, connect, disconnect, onMessage, onUnexpectedClose }
+  return { connected, connect, disconnect, onMessage, onOpen, onUnexpectedClose }
 }

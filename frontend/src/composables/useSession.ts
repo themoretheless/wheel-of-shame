@@ -71,7 +71,10 @@ async function attemptReconnect(gen: number) {
     session.value = data.session
     participants.value = data.participants
     error.value = null
-    reconnectAttempt = 0
+    // Don't reset the backoff here: the REST re-fetch succeeding doesn't mean
+    // the WebSocket will. Reset only once the socket actually opens (onOpen
+    // below), so a server that serves HTTP but drops the WS handshake still
+    // escalates the delay instead of looping at the base interval.
     console.log('[ws] session state re-synced, reopening websocket')
     ws.connect(id)
   } catch (e: any) {
@@ -89,6 +92,12 @@ async function attemptReconnect(gen: number) {
     scheduleReconnect()
   }
 }
+
+ws.onOpen(() => {
+  // A real open is the only success signal that clears the backoff, so the
+  // next unexpected drop starts the delay sequence over from the base.
+  reconnectAttempt = 0
+})
 
 ws.onUnexpectedClose(() => {
   scheduleReconnect()
