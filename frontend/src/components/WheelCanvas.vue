@@ -43,6 +43,9 @@ function readMuted(): boolean {
 const isMuted = ref(readMuted())
 function toggleMute() {
   isMuted.value = !isMuted.value
+  // The whoosh is a continuous bed, so muting mid-spin must silence it directly
+  // (the one-shot voices already self-gate on their next call).
+  if (isMuted.value) stopWhoosh()
   try {
     localStorage.setItem(MUTE_KEY, isMuted.value ? '1' : '0')
   } catch {
@@ -82,6 +85,14 @@ let lastFlapTime = 0 // performance.now() of the previous updateFlapper, for dt
 let spinSegmentIds: string[] = []
 let lastTickSegment: string | null = null
 let audioCtx: AudioContext | null = null
+// Doppler whoosh bed: a looping white-noise source through a band-pass filter,
+// held while the wheel spins so its cutoff/gain can track the angular velocity
+// each frame. Nodes are created on startWhoosh and torn down on stopWhoosh; the
+// noise buffer is cached and reused across spins.
+let whooshNoiseBuffer: AudioBuffer | null = null
+let whooshSource: AudioBufferSourceNode | null = null
+let whooshFilter: BiquadFilterNode | null = null
+let whooshGain: GainNode | null = null
 let pivotGroup: THREE.Group | null = null
 let controls: OrbitControls | null = null
 let spinBtnLeft: THREE.Mesh | null = null
@@ -1590,6 +1601,87 @@ function playCountdown() {
   }
 }
 
+// Start the spinning-air whoosh bed: a looping white-noise BufferSource fed
+// through a band-pass BiquadFilter, parked at silent gain until updateWhoosh
+// raises it from the live spin velocity. Gated on isMuted like the other voices.
+// The 1s noise buffer is synthesised once and reused across spins. No-op if a
+// bed is already running.
+function startWhoosh() {
+  if (isMuted.value || whooshSource) return
+  try {
+    if (!audioCtx) {
+      const Ctor = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
+      audioCtx = new Ctor()
+    }
+    const ctx = audioCtx
+    if (ctx.state === 'suspended') ctx.resume()
+    if (!whooshNoiseBuffer) {
+      const len = Math.floor(ctx.sampleRate)
+      whooshNoiseBuffer = ctx.createBuffer(1, len, ctx.sampleRate)
+      const data = whooshNoiseBuffer.getChannelData(0)
+      for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1
+    }
+    const now = ctx.currentTime
+    const source = ctx.createBufferSource()
+    source.buffer = whooshNoiseBuffer
+    source.loop = true
+    const filter = ctx.createBiquadFilter()
+    filter.type = 'bandpass'
+    filter.frequency.setValueAtTime(400, now)
+    filter.Q.setValueAtTime(0.7, now)
+    const gain = ctx.createGain()
+    gain.gain.setValueAtTime(0.0001, now)
+    source.connect(filter).connect(gain).connect(ctx.destination)
+    source.start(now)
+    whooshSource = source
+    whooshFilter = filter
+    whooshGain = gain
+  } catch {
+    // Audio unavailable: silently skip.
+  }
+}
+
+// Track the whoosh bed to the wheel's angular speed: faster spin pushes the
+// band-pass cutoff up (the Doppler-ish rise) and opens the gain, both easing to
+// near-silence as the wheel decelerates. `speed` is rad/frame; `intensity`
+// (0..1) is the spin progress used to fade the bed out toward the landing so it
+// doesn't fight the slow-mo crawl and thunk.
+function updateWhoosh(speed: number, intensity: number) {
+  if (!audioCtx || !whooshFilter || !whooshGain) return
+  const now = audioCtx.currentTime
+  // Map rad/frame to a 0..1 drive; ~0.4 rad/frame at peak spin reads as full.
+  const drive = Math.min(1, Math.abs(speed) / 0.4)
+  const fade = Math.max(0, 1 - intensity)
+  const targetFreq = 300 + 1500 * drive
+  const targetGain = 0.0001 + 0.13 * drive * fade
+  // Short time-constant ramps so per-frame updates glide instead of zipper.
+  whooshFilter.frequency.setTargetAtTime(targetFreq, now, 0.04)
+  whooshGain.gain.setTargetAtTime(targetGain, now, 0.05)
+}
+
+// Fade and tear down the whoosh bed once the wheel lands. The source is stopped
+// just after the fade so the tail rings out instead of clicking off.
+function stopWhoosh() {
+  if (!audioCtx || !whooshSource || !whooshGain) {
+    whooshSource = null
+    whooshFilter = null
+    whooshGain = null
+    return
+  }
+  const ctx = audioCtx
+  const now = ctx.currentTime
+  const source = whooshSource
+  try {
+    whooshGain.gain.setTargetAtTime(0.0001, now, 0.08)
+    source.stop(now + 0.4)
+  } catch {
+    // Source may already be stopped: ignore.
+  }
+  whooshSource = null
+  whooshFilter = null
+  whooshGain = null
+}
+
 // Swing the pointer off the nearest peg and tick when a peg crosses the tip.
 // `intensity` (0..1) grows toward the finale, scaling the kick and volume.
 function updateFlapper(intensity: number) {
@@ -1740,6 +1832,8 @@ function animateSpin() {
   let startTime = performance.now()
   const startRot = currentRotation
   const mainStartRot = startRot + windUpAngle
+  // Last rotation seen by the whoosh bed, to derive a per-frame angular speed.
+  let prevWhooshRot = startRot
 
   isSpinAnimating = true
   setHoveredBtn(null)
@@ -1818,6 +1912,13 @@ function animateSpin() {
       bloomPass.strength = BLOOM_BASE + 0.55 * surge
     }
 
+    // Doppler whoosh bed: drive its band-pass cutoff and gain from the per-frame
+    // angular speed, fading out by SLOWMO_START so the slow-mo crawl reads quiet.
+    // updateWhoosh no-ops when the bed isn't running (reduced motion / muted).
+    const whooshSpeed = currentRotation - prevWhooshRot
+    prevWhooshRot = currentRotation
+    updateWhoosh(whooshSpeed, t / SLOWMO_START)
+
     if (camera && spinElapsed < camReturnDuration) {
       const ct = Math.min(spinElapsed / camReturnDuration, 1)
       const ce = 1 - Math.pow(1 - ct, 2)
@@ -1878,8 +1979,10 @@ function animateSpin() {
         )
       }
 
-      // Heavy settle thunk at the instant the wheel reaches its landing peg —
-      // both when it snaps (reduced motion) and when the rock-over begins.
+      // Release the whoosh bed as the wheel reaches its landing peg, then the
+      // heavy settle thunk fires both when it snaps (reduced motion) and when
+      // the rock-over begins.
+      stopWhoosh()
       playThunk()
 
       if (reducedMotion) {
@@ -1897,9 +2000,12 @@ function animateSpin() {
   }
 
   // Launch the spin proper: rebase startTime to now so the wind-up/main phases
-  // measure from here, and kick off the frame loop.
+  // measure from here, and kick off the frame loop. The whoosh bed rides the
+  // full spin, so it starts here; reduced motion stays silent (no air rush on a
+  // single short rotation).
   function launch() {
     startTime = performance.now()
+    if (!reducedMotion) startWhoosh()
     requestAnimationFrame(frame)
   }
 
@@ -2119,6 +2225,10 @@ onBeforeUnmount(() => {
   if (sharedPegMat) sharedPegMat.dispose()
   if (countdownRing) countdownRing.geometry.dispose()
   if (countdownRingMat) countdownRingMat.dispose()
+  whooshSource = null
+  whooshFilter = null
+  whooshGain = null
+  whooshNoiseBuffer = null
   if (audioCtx) audioCtx.close().catch(() => {})
   if (controls) controls.dispose()
   if (scene && scene.environment) {
