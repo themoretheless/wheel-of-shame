@@ -1591,6 +1591,12 @@ function animateSpin() {
   const camFrom = camera.position.clone()
   const camHome = new THREE.Vector3(0, 0, homeCamZ)
   const camReturnDuration = reducedMotion ? 300 : 800
+  // Last-two showdown: with only two slices left, the slow-mo crawl earns a
+  // tighter push and a slight face tilt for a more cinematic finish. The deeper
+  // dolly target is clamped so it never frames closer than ~5.2 world units even
+  // on viewports where homeCamZ is already small.
+  const isShowdown = active.length === 2 && !reducedMotion
+  const showdownPushZ = Math.max(5.2, homeCamZ - 1.6)
 
   function frame(now: number) {
     markDirty()
@@ -1646,8 +1652,16 @@ function animateSpin() {
       // Subtle push-in during the slow-mo crawl: ease the camera toward
       // camHome*0.94 and back to home across the window (sine bump peaks at the
       // midpoint, returns to exactly camHome at t=1 so post-spin framing holds).
+      // In the last-two showdown the dolly reaches the tighter showdownPushZ
+      // target instead, and the wheel face tilts forward a touch; both ride the
+      // same sine bump so they return cleanly to rest at the landing.
       const push = Math.sin(slowmoU * Math.PI)
-      camera.position.set(camHome.x, camHome.y, camHome.z * (1 - 0.06 * push))
+      if (isShowdown) {
+        camera.position.set(camHome.x, camHome.y, camHome.z + (showdownPushZ - camHome.z) * push)
+        if (wheelGroup) wheelGroup.rotation.x = -0.07 * push
+      } else {
+        camera.position.set(camHome.x, camHome.y, camHome.z * (1 - 0.06 * push))
+      }
       camera.lookAt(controls?.target ?? new THREE.Vector3(0, 0, 0))
     } else if (camera && spinElapsed >= camReturnDuration && spinElapsed < camReturnDuration + 16) {
       camera.position.copy(camHome)
@@ -1661,6 +1675,8 @@ function animateSpin() {
         isSpinAnimating = false
         azimuthVelocity = 0
         flickCooldown = 120
+        // Clear any residual showdown face tilt so the wheel rests flat.
+        if (wheelGroup) wheelGroup.rotation.x = 0
         if (controls) {
           controls.update()
           controls.enabled = true
