@@ -2,6 +2,11 @@
 import { ref, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js'
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js'
 import opentype from 'opentype.js'
 import type { Participant } from '../types'
 
@@ -27,6 +32,7 @@ const COLORS = [
 ]
 
 let renderer: THREE.WebGLRenderer | null = null
+let composer: EffectComposer | null = null
 let scene: THREE.Scene | null = null
 let camera: THREE.PerspectiveCamera | null = null
 let wheelGroup: THREE.Group | null = null
@@ -600,6 +606,13 @@ function animateSegmentShrink(winnerId: string, callback: () => void) {
   if (winMesh) {
     // Undo the lift applied by animateWinnerReveal so the winner shrinks flat.
     winMesh.position.z = -WHEEL_DEPTH / 2
+    // Drop the private emissive clone and restore the shared cached material.
+    const baseMaterial = winMesh.userData.baseMaterial as THREE.MeshStandardMaterial | undefined
+    if (baseMaterial) {
+      ;(winMesh.material as THREE.MeshStandardMaterial).dispose()
+      winMesh.material = baseMaterial
+      delete winMesh.userData.baseMaterial
+    }
     for (const child of winMesh.children) {
       if (!(child instanceof THREE.Mesh)) continue
       const orig = Array.isArray(child.material) ? child.material : [child.material]
@@ -724,7 +737,12 @@ function handleResize() {
   // with a different DPI, otherwise the canvas renders blurry or oversharp.
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
   renderer.setSize(w, h)
+  if (composer) {
+    composer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+    composer.setSize(w, h)
+  }
   fitWheel()
+  markDirty()
 }
 
 // Creates an arc button with an arrowhead integrated into the shape.
@@ -882,6 +900,21 @@ function initScene() {
   renderer.toneMappingExposure = 1.2
   container.appendChild(renderer.domElement)
 
+  // Studio image-based lighting: bake a RoomEnvironment into a PMREM so the
+  // metallic hub/pins/pegs pick up soft, realistic reflections.
+  const pmrem = new THREE.PMREMGenerator(renderer)
+  scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture
+  pmrem.dispose()
+
+  // Cinematic bloom: render through an EffectComposer so bright highlights
+  // (notably the lifted winner segment) bleed a soft glow. OutputPass applies
+  // tone mapping + sRGB at the end of the chain.
+  composer = new EffectComposer(renderer)
+  composer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+  composer.setSize(w, h)
+  composer.addPass(new RenderPass(scene, camera))
+  composer.addPass(new UnrealBloomPass(new THREE.Vector2(w, h), 0.55, 0.5, 0.85))
+  composer.addPass(new OutputPass())
 
   controls = new OrbitControls(camera, renderer.domElement)
   controls.enableDamping = true
@@ -1106,7 +1139,8 @@ function startRenderLoop() {
 
     if (needsRender) {
       needsRender = false
-      renderer.render(scene, camera)
+      if (composer) composer.render()
+      else renderer.render(scene, camera)
     }
     animFrameId = requestAnimationFrame(loop)
   }
@@ -1125,6 +1159,19 @@ function animateWinnerReveal(
   const seg = segmentMeshes.find((m) => m?.userData?.participantId === winnerId)
   if (!seg) { onDismiss(); return }
 
+  // Give the winner a private emissive material (cloned so the shared cached
+  // segment material stays untouched) and ramp it up so the bloom pass catches
+  // the lifted slice. The clone is restored to the shared material on shrink.
+  const baseMat = seg.material as THREE.MeshStandardMaterial
+  if (!seg.userData.baseMaterial) {
+    const glowMat = baseMat.clone()
+    glowMat.emissive = new THREE.Color(baseMat.color)
+    glowMat.emissiveIntensity = 0
+    seg.userData.baseMaterial = baseMat
+    seg.material = glowMat
+  }
+  const glow = seg.material as THREE.MeshStandardMaterial
+
   const startZ = -WHEEL_DEPTH / 2
   const duration = 500
   const startTime = performance.now()
@@ -1134,6 +1181,7 @@ function animateWinnerReveal(
     const t = Math.min((now - startTime) / duration, 1)
     const eased = 1 - Math.pow(1 - t, 3) * Math.cos(t * Math.PI * 2)
     seg!.position.z = startZ + 0.4 * eased
+    glow.emissiveIntensity = 0.9 * Math.min(t, 1)
 
     if (t < 1) {
       requestAnimationFrame(frame)
@@ -1419,6 +1467,11 @@ onBeforeUnmount(() => {
   if (sharedPegMat) sharedPegMat.dispose()
   if (audioCtx) audioCtx.close().catch(() => {})
   if (controls) controls.dispose()
+  if (scene && scene.environment) {
+    scene.environment.dispose()
+    scene.environment = null
+  }
+  if (composer) composer.dispose()
   if (renderer) {
     renderer.domElement.remove()
     renderer.dispose()
