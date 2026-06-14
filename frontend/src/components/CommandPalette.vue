@@ -53,6 +53,35 @@ function fuzzyScore(text: string, query: string): number {
   return score
 }
 
+// Frecency: a per-command {count, lastUsed} map persisted to localStorage and
+// updated each time a command runs. It powers two things: a tiebreaker so that,
+// among equal fuzzy scores, the commands you reach for most float up; and, with
+// an empty query, a 'Recent' group of your habitual commands above the rest.
+const FRECENCY_KEY = 'wheel-palette-frecency'
+interface FrecencyEntry {
+  count: number
+  lastUsed: number
+}
+function loadFrecency(): Record<string, FrecencyEntry> {
+  try {
+    if (typeof localStorage === 'undefined') return {}
+    const raw = localStorage.getItem(FRECENCY_KEY)
+    const parsed = raw ? JSON.parse(raw) : {}
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+// Recency half-life in milliseconds: a command's recency weight halves once a
+// day passes since its last use, so yesterday's habit yields to today's.
+const FRECENCY_HALFLIFE = 24 * 60 * 60 * 1000
+function frecencyScore(entry: FrecencyEntry | undefined): number {
+  if (!entry) return 0
+  const age = Date.now() - entry.lastUsed
+  const recency = Math.pow(0.5, Math.max(0, age) / FRECENCY_HALFLIFE)
+  return entry.count * (0.5 + recency)
+}
+
 const props = defineProps<{
   open: boolean
   commands: Command[]
@@ -65,6 +94,24 @@ const emit = defineEmits<{
 const query = ref('')
 const activeIndex = ref(0)
 const inputRef = ref<HTMLInputElement | null>(null)
+const frecency = ref<Record<string, FrecencyEntry>>(loadFrecency())
+
+// Bump a command's frecency on use and persist. Called from both the regular
+// run path and the inline-submit path so inline commands count too.
+function recordUse(id: string) {
+  const prev = frecency.value[id]
+  frecency.value = {
+    ...frecency.value,
+    [id]: { count: (prev?.count ?? 0) + 1, lastUsed: Date.now() },
+  }
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(FRECENCY_KEY, JSON.stringify(frecency.value))
+    }
+  } catch {
+    // Persistence is best-effort; an exception (quota/private mode) is non-fatal.
+  }
+}
 
 // The command currently in inline-entry mode, plus its field value. When set,
 // the list is replaced by a single text input bound to inlineValue.
@@ -75,17 +122,25 @@ const inlineInputRef = ref<HTMLInputElement | null>(null)
 const filtered = computed(() => {
   const q = query.value.trim().toLowerCase()
   const list = props.commands.filter((c) => !c.disabled)
-  if (!q) return list
+  if (!q) {
+    // No query: keep the declared order but lift commands with frecency history
+    // to the top (most-frecent first), so habitual actions are one Enter away.
+    const ranked = list
+      .map((c, i) => ({ c, i, fr: frecencyScore(frecency.value[c.id]) }))
+      .sort((a, b) => (b.fr - a.fr) || (a.i - b.i))
+    return ranked.map((entry) => entry.c)
+  }
   // Fuzzy-match against the best of label/hint/subtitle, then rank by score so
-  // the closest command floats to the top regardless of source field.
+  // the closest command floats to the top regardless of source field, breaking
+  // ties by frecency so the command you pick most among equals wins.
   return list
     .map((c) => {
       const fields = [c.label, c.hint, c.subtitle].filter(Boolean) as string[]
       const score = Math.max(...fields.map((f) => fuzzyScore(f.toLowerCase(), q)))
-      return { c, score }
+      return { c, score, fr: frecencyScore(frecency.value[c.id]) }
     })
     .filter((entry) => entry.score >= 0)
-    .sort((a, b) => b.score - a.score)
+    .sort((a, b) => (b.score - a.score) || (b.fr - a.fr))
     .map((entry) => entry.c)
 })
 
@@ -93,13 +148,18 @@ const filtered = computed(() => {
 const activeCommand = computed(() => filtered.value[activeIndex.value] ?? null)
 
 // Pair each filtered command with the group header to show above it: a label is
-// rendered only when the command's group differs from the previous visible row,
-// so contiguous groups get a single sticky separator (and ungrouped rows none).
+// rendered only when the command's effective group differs from the previous
+// visible row, so contiguous groups get a single sticky separator (and ungrouped
+// rows none). With an empty query, commands that have frecency history are shown
+// under a leading 'Recent' group regardless of their declared group.
 const rows = computed(() => {
+  const showRecent = query.value.trim() === ''
   let prevGroup: string | undefined
   return filtered.value.map((c) => {
-    const header = c.group && c.group !== prevGroup ? c.group : null
-    prevGroup = c.group
+    const group =
+      showRecent && frecencyScore(frecency.value[c.id]) > 0 ? 'Recent' : c.group
+    const header = group && group !== prevGroup ? group : null
+    prevGroup = group
     return { c, header }
   })
 })
@@ -136,6 +196,7 @@ function runActive() {
     void nextTick(() => inlineInputRef.value?.focus())
     return
   }
+  recordUse(cmd.id)
   const keepOpen = cmd.run()
   if (keepOpen !== false) emit('close')
 }
@@ -145,6 +206,7 @@ function submitInline() {
   if (!cmd?.inline) return
   const value = inlineValue.value.trim()
   if (!value) return
+  recordUse(cmd.id)
   const keepOpen = cmd.inline.submit(value)
   if (keepOpen === false) {
     // Stay in inline mode for another entry (e.g. adding several names).
