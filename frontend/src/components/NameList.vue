@@ -11,6 +11,9 @@ function initialOf(name: string): string {
 const props = defineProps<{
   active: Participant[]
   removed: Participant[]
+  // Id of the participant whose wheel segment is under the pointer mid-spin; the
+  // matching row gets a transient '.ticking' flash so the roster reads the spin.
+  tickingId?: string | null
 }>()
 
 // Each active name has equal odds of being picked next; this drives the tinted
@@ -69,10 +72,11 @@ function addName() {
           v-for="p in active"
           :key="p.id"
           class="participant-item"
-          :class="{ pending: p.pending, error: p.error }"
+          :class="{ pending: p.pending, error: p.error, ticking: p.id === tickingId }"
           :style="{
             '--odds-width': oddsPct + '%',
             '--odds-color': identityColor(p.name),
+            '--tick-color': identityColor(p.name),
           }"
         >
           <span class="name-cell">
@@ -202,6 +206,11 @@ ol {
   margin-bottom: 4px;
   background: rgba(255, 255, 255, 0.05);
   overflow: hidden;
+  /* Snappy catch on the spin spotlight, easing out as the next row takes over. */
+  transition:
+    transform 0.18s ease-out,
+    box-shadow 0.18s ease-out,
+    background 0.18s ease-out;
 }
 
 /* Live odds bar: a tinted fill behind the row, its width the participant's
@@ -260,6 +269,26 @@ ol {
 .participant-item.picked {
   opacity: 0.6;
   text-decoration: line-through;
+}
+
+/* Spin spotlight: while a participant's wheel segment is under the pointer, its
+   roster row briefly lifts and glows in the participant's identity color, so the
+   list reads the spin in sync with the wheel. The class is toggled on/off as the
+   pointer crosses segments, so the ease-out transition does the flashing without
+   a keyframe restart. The transition stays short on the way in (snappy catch) and
+   eases out as the next row takes over. */
+.participant-item.ticking {
+  transform: scale(1.04);
+  background: color-mix(in srgb, var(--tick-color, #4ECDC4) 22%, rgba(255, 255, 255, 0.05));
+  box-shadow: 0 0 0 1px var(--tick-color, #4ECDC4), 0 4px 16px rgba(0, 0, 0, 0.35);
+  z-index: 1;
+}
+
+/* Reduced motion: keep the color/glow flash but drop the scale lift. */
+@media (prefers-reduced-motion: reduce) {
+  .participant-item.ticking {
+    transform: none;
+  }
 }
 
 /* Optimistic add: a settling skeleton chip that pulses until the server

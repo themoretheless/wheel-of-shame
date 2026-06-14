@@ -22,6 +22,9 @@ const emit = defineEmits<{
   (e: 'spin-click', direction: 'left' | 'right'): void
   (e: 'winner-reveal', data: { id: string; name: string; remaining: number }): void
   (e: 'camera-drifted', drifted: boolean): void
+  // Participant id of the segment currently under the pointer during a spin
+  // (null once the spin ends), so the roster can flash the matching row in sync.
+  (e: 'tick-segment', participantId: string | null): void
 }>()
 
 const containerRef = ref<HTMLDivElement | null>(null)
@@ -58,6 +61,10 @@ let pegMeshes: THREE.Mesh[] = []
 let donutMeshes: THREE.Mesh[] = [] // per-segment odds-donut arcs around the hub
 let pegSpacing = 0 // angular gap between pegs during the active spin
 let prevPegSign = 0 // sign of the nearest-peg offset, to detect crossings
+// Active participant ids in segment order, captured at spin start so updateFlapper
+// can name the segment currently under the pointer for the roster-row spotlight.
+let spinSegmentIds: string[] = []
+let lastTickSegment: string | null = null
 let audioCtx: AudioContext | null = null
 let pivotGroup: THREE.Group | null = null
 let controls: OrbitControls | null = null
@@ -1513,6 +1520,21 @@ function updateFlapper(intensity: number) {
     playTick(0.04 + 0.16 * intensity)
   }
   prevPegSign = sign
+
+  // Name the segment under the top pointer so the parent can flash the matching
+  // roster row in sync. The local angle at the pointer is (π/2 - currentRotation);
+  // segment i occupies [i·spacing, (i+1)·spacing), so flooring gives its index.
+  // Emit only on change to keep this to one event per crossing, not per frame.
+  if (spinSegmentIds.length > 0) {
+    const count = spinSegmentIds.length
+    const norm = ((Math.PI / 2 - currentRotation) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2)
+    const idx = Math.min(count - 1, Math.floor(norm / pegSpacing))
+    const id = spinSegmentIds[idx]
+    if (id !== lastTickSegment) {
+      lastTickSegment = id
+      emit('tick-segment', id)
+    }
+  }
 }
 
 // Moderate "tip-over": after the wheel lands it rocks slightly past the final
@@ -1586,6 +1608,10 @@ function animateSpin() {
   resetSegments()
   pegSpacing = sliceAngle
   prevPegSign = 0
+  // Segment-order ids for the roster-row spotlight; reset the change tracker so
+  // the first crossing emits even if it lands on the same id as a prior spin.
+  spinSegmentIds = active.map((p) => p.id)
+  lastTickSegment = null
   if (controls) controls.enabled = false
 
   const camFrom = camera.position.clone()
@@ -1675,6 +1701,13 @@ function animateSpin() {
         isSpinAnimating = false
         azimuthVelocity = 0
         flickCooldown = 120
+        // Wheel is at rest: stop the roster-row spotlight before the winner
+        // reveal takes over.
+        spinSegmentIds = []
+        if (lastTickSegment !== null) {
+          lastTickSegment = null
+          emit('tick-segment', null)
+        }
         // Clear any residual showdown face tilt so the wheel rests flat.
         if (wheelGroup) wheelGroup.rotation.x = 0
         if (controls) {

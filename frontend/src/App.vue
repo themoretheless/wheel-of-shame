@@ -38,6 +38,9 @@ const winnerData = ref<{ id: string; name: string; remaining: number } | null>(n
 // True while the orbit camera has been dragged off its resting framing; drives
 // the Snap-home reset pill below the header.
 const cameraDrifted = ref(false)
+// Participant id whose wheel segment is currently under the pointer mid-spin;
+// NameList flashes the matching roster row in sync. Null when not spinning.
+const tickingId = ref<string | null>(null)
 // Mirror of WheelCanvas's persisted spin-sound mute flag, seeded from the same
 // localStorage key so the dock button shows the right state before the canvas
 // mounts. The toggle below drives the canvas, which owns persistence.
@@ -335,6 +338,10 @@ function onCameraDrifted(drifted: boolean) {
   cameraDrifted.value = drifted
 }
 
+function onTickSegment(participantId: string | null) {
+  tickingId.value = participantId
+}
+
 function resetView() {
   wheelRef.value?.resetView()
 }
@@ -479,6 +486,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
     @spin-click="handleSpin"
     @winner-reveal="onWinnerReveal"
     @camera-drifted="onCameraDrifted"
+    @tick-segment="onTickSegment"
   />
 
   <!-- UI overlay -->
@@ -610,6 +618,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
             <NameList
               :active="activeParticipants"
               :removed="removedParticipants"
+              :ticking-id="tickingId"
               @add="addName"
               @add-batch="addNames"
               @remove="removeName"
