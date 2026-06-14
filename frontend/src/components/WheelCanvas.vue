@@ -2,8 +2,14 @@
 import { ref, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js'
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js'
 import opentype from 'opentype.js'
 import type { Participant } from '../types'
+import { identityColor } from '../utils/identity'
 
 const props = defineProps<{
   participants: Participant[]
@@ -19,14 +25,8 @@ const emit = defineEmits<{
 
 const containerRef = ref<HTMLDivElement | null>(null)
 
-const COLORS = [
-  '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4',
-  '#FFEAA7', '#DDA0DD', '#98D8C8', '#F7DC6F',
-  '#BB8FCE', '#85C1E9', '#F0B27A', '#82E0AA',
-  '#F1948A', '#AED6F1', '#D7BDE2', '#A3E4D7',
-]
-
 let renderer: THREE.WebGLRenderer | null = null
+let composer: EffectComposer | null = null
 let scene: THREE.Scene | null = null
 let camera: THREE.PerspectiveCamera | null = null
 let wheelGroup: THREE.Group | null = null
@@ -460,6 +460,9 @@ function buildWheelWithAngles(
   segmentMeshes = []
   dividerLines = []
   pegMeshes = []
+  // Old segment meshes are gone; drop any dangling hover reference so the
+  // ease loop doesn't touch a disposed mesh.
+  hoveredSeg = null
   markDirty()
 
   if (active.length === 0) {
@@ -514,7 +517,7 @@ function buildWheelWithAngles(
     }
     const startAngle = cursor
     cursor += segAngle
-    const color = COLORS[i % COLORS.length]
+    const color = identityColor(p.name)
 
     const mesh = new THREE.Mesh(getSegmentGeometry(segAngle), getCachedMat(color, 0.1, 0.55))
     mesh.position.z = -WHEEL_DEPTH / 2
@@ -600,6 +603,13 @@ function animateSegmentShrink(winnerId: string, callback: () => void) {
   if (winMesh) {
     // Undo the lift applied by animateWinnerReveal so the winner shrinks flat.
     winMesh.position.z = -WHEEL_DEPTH / 2
+    // Drop the private emissive clone and restore the shared cached material.
+    const baseMaterial = winMesh.userData.baseMaterial as THREE.MeshStandardMaterial | undefined
+    if (baseMaterial) {
+      ;(winMesh.material as THREE.MeshStandardMaterial).dispose()
+      winMesh.material = baseMaterial
+      delete winMesh.userData.baseMaterial
+    }
     for (const child of winMesh.children) {
       if (!(child instanceof THREE.Mesh)) continue
       const orig = Array.isArray(child.material) ? child.material : [child.material]
@@ -724,7 +734,12 @@ function handleResize() {
   // with a different DPI, otherwise the canvas renders blurry or oversharp.
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
   renderer.setSize(w, h)
+  if (composer) {
+    composer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+    composer.setSize(w, h)
+  }
   fitWheel()
+  markDirty()
 }
 
 // Creates an arc button with an arrowhead integrated into the shape.
@@ -882,6 +897,21 @@ function initScene() {
   renderer.toneMappingExposure = 1.2
   container.appendChild(renderer.domElement)
 
+  // Studio image-based lighting: bake a RoomEnvironment into a PMREM so the
+  // metallic hub/pins/pegs pick up soft, realistic reflections.
+  const pmrem = new THREE.PMREMGenerator(renderer)
+  scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture
+  pmrem.dispose()
+
+  // Cinematic bloom: render through an EffectComposer so bright highlights
+  // (notably the lifted winner segment) bleed a soft glow. OutputPass applies
+  // tone mapping + sRGB at the end of the chain.
+  composer = new EffectComposer(renderer)
+  composer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+  composer.setSize(w, h)
+  composer.addPass(new RenderPass(scene, camera))
+  composer.addPass(new UnrealBloomPass(new THREE.Vector2(w, h), 0.55, 0.5, 0.85))
+  composer.addPass(new OutputPass())
 
   controls = new OrbitControls(camera, renderer.domElement)
   controls.enableDamping = true
@@ -1106,7 +1136,8 @@ function startRenderLoop() {
 
     if (needsRender) {
       needsRender = false
-      renderer.render(scene, camera)
+      if (composer) composer.render()
+      else renderer.render(scene, camera)
     }
     animFrameId = requestAnimationFrame(loop)
   }
@@ -1125,6 +1156,19 @@ function animateWinnerReveal(
   const seg = segmentMeshes.find((m) => m?.userData?.participantId === winnerId)
   if (!seg) { onDismiss(); return }
 
+  // Give the winner a private emissive material (cloned so the shared cached
+  // segment material stays untouched) and ramp it up so the bloom pass catches
+  // the lifted slice. The clone is restored to the shared material on shrink.
+  const baseMat = seg.material as THREE.MeshStandardMaterial
+  if (!seg.userData.baseMaterial) {
+    const glowMat = baseMat.clone()
+    glowMat.emissive = new THREE.Color(baseMat.color)
+    glowMat.emissiveIntensity = 0
+    seg.userData.baseMaterial = baseMat
+    seg.material = glowMat
+  }
+  const glow = seg.material as THREE.MeshStandardMaterial
+
   const startZ = -WHEEL_DEPTH / 2
   const duration = 500
   const startTime = performance.now()
@@ -1134,6 +1178,7 @@ function animateWinnerReveal(
     const t = Math.min((now - startTime) / duration, 1)
     const eased = 1 - Math.pow(1 - t, 3) * Math.cos(t * Math.PI * 2)
     seg!.position.z = startZ + 0.4 * eased
+    glow.emissiveIntensity = 0.9 * Math.min(t, 1)
 
     if (t < 1) {
       requestAnimationFrame(frame)
@@ -1269,11 +1314,18 @@ function animateSpin() {
   const fullSpins = Math.PI * 2 * (5 + Math.floor(Math.random() * 3)) * spinDirection
   const totalRotation = fullSpins + delta
   const duration = 4000
+  // Anticipation wind-up: a brief reverse rotation that loads the spin before
+  // it launches forward. The wheel still lands at startRot + totalRotation, so
+  // the main phase travels (totalRotation - windUpAngle) from the wound point.
+  const windUpDuration = 250
+  const windUpAngle = -spinDirection * 0.12
   const startTime = performance.now()
   const startRot = currentRotation
+  const mainStartRot = startRot + windUpAngle
 
   isSpinAnimating = true
   setHoveredBtn(null)
+  clearSegmentHover()
   resetSegments()
   pegSpacing = sliceAngle
   prevPegSign = 0
@@ -1286,21 +1338,39 @@ function animateSpin() {
   function frame(now: number) {
     markDirty()
     const elapsed = now - startTime
-    const t = Math.min(elapsed / duration, 1)
+
+    if (elapsed < windUpDuration) {
+      // Ease-in reverse load; hold the camera at its drop framing so the
+      // camera return reads as starting only once the wheel snaps forward.
+      const wt = elapsed / windUpDuration
+      const wEase = wt * wt
+      currentRotation = startRot + windUpAngle * wEase
+      if (wheelGroup) wheelGroup.rotation.z = currentRotation
+      updateFlapper(0)
+      if (camera) {
+        camera.position.copy(camFrom)
+        camera.lookAt(controls?.target ?? new THREE.Vector3(0, 0, 0))
+      }
+      requestAnimationFrame(frame)
+      return
+    }
+
+    const spinElapsed = elapsed - windUpDuration
+    const t = Math.min(spinElapsed / duration, 1)
     const eased = 1 - Math.pow(1 - t, 3)
 
-    currentRotation = startRot + totalRotation * eased
+    currentRotation = mainStartRot + (totalRotation - windUpAngle) * eased
     if (wheelGroup) {
       wheelGroup.rotation.z = currentRotation
     }
     updateFlapper(t)
 
-    if (camera && elapsed < camReturnDuration) {
-      const ct = Math.min(elapsed / camReturnDuration, 1)
+    if (camera && spinElapsed < camReturnDuration) {
+      const ct = Math.min(spinElapsed / camReturnDuration, 1)
       const ce = 1 - Math.pow(1 - ct, 2)
       camera.position.lerpVectors(camFrom, camHome, ce)
       camera.lookAt(controls?.target ?? new THREE.Vector3(0, 0, 0))
-    } else if (camera && elapsed >= camReturnDuration && elapsed < camReturnDuration + 16) {
+    } else if (camera && spinElapsed >= camReturnDuration && spinElapsed < camReturnDuration + 16) {
       camera.position.copy(camHome)
       camera.lookAt(controls?.target ?? new THREE.Vector3(0, 0, 0))
     }
@@ -1363,10 +1433,109 @@ function setHoveredBtn(btn: THREE.Mesh | null) {
   markDirty()
 }
 
+// Metallic segment hover lift: the slice under the cursor eases up in Z and
+// gains a faint emissive glow, reusing animateWinnerReveal's clone-and-bump
+// pattern so the shared cached segment material stays untouched. Only one
+// segment is lifted at a time; the previous one eases back down.
+const SEG_HOVER_LIFT = 0.08
+let hoveredSeg: THREE.Mesh | null = null
+let segHoverAnimating = false
+
+function liftMaterial(seg: THREE.Mesh): THREE.MeshStandardMaterial {
+  // Clone once into a private emissive material; restore-on-leave is handled by
+  // settling position only — the clone is cheap to keep and reused on re-hover.
+  if (!seg.userData.hoverBaseMaterial) {
+    const base = seg.material as THREE.MeshStandardMaterial
+    const glow = base.clone()
+    glow.emissive = new THREE.Color(base.color)
+    glow.emissiveIntensity = 0
+    seg.userData.hoverBaseMaterial = base
+    seg.material = glow
+  }
+  return seg.material as THREE.MeshStandardMaterial
+}
+
+function setHoveredSegment(seg: THREE.Mesh | null) {
+  if (seg === hoveredSeg) return
+  hoveredSeg = seg
+  if (!segHoverAnimating) {
+    segHoverAnimating = true
+    requestAnimationFrame(segHoverFrame)
+  }
+}
+
+// Synchronously drop any lifted segment back to rest (used when a spin starts,
+// where resetSegments force-snaps Z and the eased clones must not linger).
+function clearSegmentHover() {
+  hoveredSeg = null
+  const baseZ = -WHEEL_DEPTH / 2
+  for (const seg of segmentMeshes) {
+    if (!seg || seg.userData.hoverBaseMaterial === undefined) continue
+    if (seg.userData.baseMaterial) continue // owned by the winner reveal
+    ;(seg.material as THREE.MeshStandardMaterial).dispose()
+    seg.material = seg.userData.hoverBaseMaterial as THREE.MeshStandardMaterial
+    delete seg.userData.hoverBaseMaterial
+    seg.position.z = baseZ
+  }
+  markDirty()
+}
+
+// Eases every lifted segment toward its target (raised + glowing when hovered,
+// flat + dark otherwise) and stops once they have all settled. A segment that
+// reaches its lifted target is held in place (loop pauses, no idle re-renders);
+// a segment that returns to rest drops its private clone. Skips the winner
+// segment, which animateWinnerReveal owns via userData.baseMaterial.
+const SEG_HOVER_GLOW = 0.45
+
+function segHoverFrame() {
+  let moving = false
+  const baseZ = -WHEEL_DEPTH / 2
+  for (const seg of segmentMeshes) {
+    if (!seg) continue
+    if (seg.userData.baseMaterial) continue // owned by the winner reveal
+    const lifted = seg.userData.hoverBaseMaterial !== undefined
+    const isHovered = seg === hoveredSeg && !isSpinAnimating && !props.spinning
+    if (!lifted) {
+      if (!isHovered) continue
+      liftMaterial(seg)
+    }
+    const targetZ = isHovered ? baseZ + SEG_HOVER_LIFT : baseZ
+    const targetGlow = isHovered ? SEG_HOVER_GLOW : 0
+    const glow = seg.material as THREE.MeshStandardMaterial
+    seg.position.z += (targetZ - seg.position.z) * 0.2
+    glow.emissiveIntensity += (targetGlow - glow.emissiveIntensity) * 0.2
+    const atTarget =
+      Math.abs(targetZ - seg.position.z) < 0.001 &&
+      Math.abs(targetGlow - glow.emissiveIntensity) < 0.005
+    if (!atTarget) {
+      moving = true
+      continue
+    }
+    if (isHovered) {
+      // Settled at the lifted target: snap exactly and stop animating this one.
+      seg.position.z = targetZ
+      glow.emissiveIntensity = targetGlow
+    } else {
+      // Returned to rest: drop the private clone and restore the shared material.
+      seg.position.z = baseZ
+      glow.dispose()
+      seg.material = seg.userData.hoverBaseMaterial as THREE.MeshStandardMaterial
+      delete seg.userData.hoverBaseMaterial
+    }
+  }
+  markDirty()
+  if (moving) {
+    requestAnimationFrame(segHoverFrame)
+  } else {
+    segHoverAnimating = false
+  }
+}
+
 function onCanvasMouseMove(e: MouseEvent) {
   if (!renderer || !camera) return
   if (props.spinning || isSpinAnimating) {
     setHoveredBtn(null)
+    setHoveredSegment(null)
     return
   }
   const rect = renderer.domElement.getBoundingClientRect()
@@ -1386,6 +1555,16 @@ function onCanvasMouseMove(e: MouseEvent) {
     }
   }
   setHoveredBtn(hit)
+
+  // A button takes priority over the segment beneath it. Otherwise lift the
+  // nearest segment the ray hits.
+  let segHit: THREE.Mesh | null = null
+  if (!hit) {
+    const segs = segmentMeshes.filter((m): m is THREE.Mesh => m !== null)
+    const segHits = raycaster.intersectObjects(segs, false)
+    if (segHits.length > 0) segHit = segHits[0].object as THREE.Mesh
+  }
+  setHoveredSegment(segHit)
 }
 
 watch(
@@ -1419,6 +1598,11 @@ onBeforeUnmount(() => {
   if (sharedPegMat) sharedPegMat.dispose()
   if (audioCtx) audioCtx.close().catch(() => {})
   if (controls) controls.dispose()
+  if (scene && scene.environment) {
+    scene.environment.dispose()
+    scene.environment = null
+  }
+  if (composer) composer.dispose()
   if (renderer) {
     renderer.domElement.remove()
     renderer.dispose()

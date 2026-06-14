@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, watch, onMounted, onBeforeUnmount, defineAsyncComponent } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, defineAsyncComponent } from 'vue'
 const WheelCanvas = defineAsyncComponent(() => import('./components/WheelCanvas.vue'))
 import NameList from './components/NameList.vue'
 import SpinResultModal from './components/SpinResult.vue'
+import CommandPalette, { type Command } from './components/CommandPalette.vue'
 import { useSession } from './composables/useSession'
 
 const {
@@ -216,16 +217,36 @@ onMounted(() => {
     if (id) load(id)
   }
   initFlame()
+  window.addEventListener('keydown', onGlobalKeydown)
 })
 
 onBeforeUnmount(() => {
   cancelAnimationFrame(flameAnimId)
   flameCleanup?.()
+  window.removeEventListener('keydown', onGlobalKeydown)
 })
 
+// A SpinResult from another client: drive the wheel to that winner with the
+// same animation as a local spin, instead of jumping to the result. The picked
+// participant is still active in activeParticipants (useSession defers the
+// removal), so animateSpin can land on its segment; applySpinResult marks it
+// removed on spin-complete.
 watch(remoteSpinResult, (result) => {
-  if (!result || isLocalSpin) return
-  remoteSpinResult.value = null
+  if (!result) return
+  // Ignore our own spin (handled by the local path) and don't interrupt an
+  // animation already in flight; apply the latter directly so it isn't lost.
+  if (isLocalSpin) {
+    remoteSpinResult.value = null
+    return
+  }
+  if (spinning.value) {
+    applySpinResult(result)
+    remoteSpinResult.value = null
+    return
+  }
+  pendingSpinResult = result
+  winnerId.value = result.picked.id
+  spinning.value = true
 })
 
 async function createSession() {
@@ -276,6 +297,92 @@ function copyLink() {
   const url = `${window.location.origin}${window.location.pathname}#/${session.value.id}`
   navigator.clipboard.writeText(url)
 }
+
+// --- Command palette (Cmd-K / Ctrl-K) ---
+const paletteOpen = ref(false)
+
+const paletteCommands = computed<Command[]>(() => [
+  {
+    id: 'spin',
+    label: 'Spin the wheel',
+    hint: 'Spin',
+    disabled: spinning.value || activeParticipants.value.length === 0,
+    run: () => {
+      handleSpin()
+    },
+  },
+  {
+    id: 'add',
+    label: 'Add a name',
+    hint: 'New participant',
+    disabled: !session.value,
+    run: () => {
+      const name = window.prompt('Name to add')?.trim()
+      if (name) addName(name)
+    },
+  },
+  {
+    id: 'reset',
+    label: 'Reset the wheel',
+    hint: 'Restore everyone',
+    disabled: !session.value || removedParticipants.value.length === 0,
+    run: () => {
+      reset()
+    },
+  },
+  {
+    id: 'copy-link',
+    label: 'Copy share link',
+    hint: 'Share',
+    disabled: !session.value,
+    run: () => {
+      copyLink()
+    },
+  },
+  // One spotlight command per active participant: type a name into Cmd-K and
+  // the fuzzy scorer floats the match to the top, then Enter eliminates them.
+  ...activeParticipants.value.map((p): Command => {
+    const odds = Math.round(100 / activeParticipants.value.length)
+    return {
+      id: `remove-${p.id}`,
+      label: `Eliminate ${p.name}`,
+      subtitle: `${odds}% to be picked next`,
+      hint: 'Remove',
+      run: () => {
+        removeName(p.id)
+      },
+    }
+  }),
+])
+
+// True when the keystroke targets a text field (name input, palette, etc.),
+// so global shortcuts don't hijack normal typing: a space in a name should
+// insert a space, not spin the wheel.
+function isEditableTarget(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null
+  if (!el) return false
+  const tag = el.tagName
+  return tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable
+}
+
+function onGlobalKeydown(e: KeyboardEvent) {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault()
+    paletteOpen.value = !paletteOpen.value
+    return
+  }
+  // The command palette owns the keyboard while it's open (Escape closes it).
+  if (paletteOpen.value) return
+
+  if (e.code === 'Space' && !isEditableTarget(e.target)) {
+    e.preventDefault()
+    // Don't spin underneath the winner modal: Space is inert until dismissed.
+    if (!winnerData.value) handleSpin()
+  } else if (e.key === 'Escape' && winnerData.value) {
+    e.preventDefault()
+    dismissWinner()
+  }
+}
 </script>
 
 <template>
@@ -323,6 +430,7 @@ function copyLink() {
           <span class="ws-status" :class="{ connected: wsConnected }">
             {{ wsConnected ? 'Live' : 'Offline' }}
           </span>
+          <span class="kbd-hint" title="Press Space to spin"><kbd>Space</kbd> to spin</span>
           <button @click="copyLink" class="btn btn-small" title="Copy link">Share</button>
         </div>
       </div>
@@ -358,6 +466,12 @@ function copyLink() {
       @close="dismissWinner"
     />
   </Teleport>
+
+  <CommandPalette
+    :open="paletteOpen"
+    :commands="paletteCommands"
+    @close="paletteOpen = false"
+  />
 </template>
 
 <style scoped>
@@ -525,6 +639,20 @@ function copyLink() {
 .ws-status.connected {
   background: rgba(78, 205, 196, 0.2);
   color: #4ECDC4;
+}
+
+.kbd-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: rgba(223, 230, 233, 0.6);
+}
+
+@media (max-width: 700px) {
+  .kbd-hint {
+    display: none;
+  }
 }
 
 .session-header {

@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import type { Participant } from '../types'
+import { identityColor } from '../utils/identity'
+
+// First visible character, upper-cased, for the round identity token.
+function initialOf(name: string): string {
+  return (name.trim()[0] ?? '?').toUpperCase()
+}
 
 defineProps<{
   active: Participant[]
@@ -50,9 +56,24 @@ function addName() {
     <div class="participants">
       <h3>Active ({{ active.length }})</h3>
       <ul v-if="active.length > 0">
-        <li v-for="p in active" :key="p.id" class="participant-item">
-          <span>{{ p.name }}</span>
-          <button @click="emit('remove', p.id)" class="btn btn-remove" title="Remove">
+        <li
+          v-for="p in active"
+          :key="p.id"
+          class="participant-item"
+          :class="{ pending: p.pending, error: p.error }"
+        >
+          <span class="name-cell">
+            <span class="identity-token" :style="{ background: identityColor(p.name) }">{{
+              initialOf(p.name)
+            }}</span>
+            <span class="name-text">{{ p.name }}</span>
+          </span>
+          <button
+            v-if="!p.pending"
+            @click="emit('remove', p.id)"
+            class="btn btn-remove"
+            title="Remove"
+          >
             &times;
           </button>
         </li>
@@ -64,7 +85,12 @@ function addName() {
       <h3>Picked ({{ removed.length }})</h3>
       <ol>
         <li v-for="p in removed" :key="p.id" class="participant-item picked">
-          <span>#{{ p.spin_order }} — {{ p.name }}</span>
+          <span class="name-cell">
+            <span class="identity-token" :style="{ background: identityColor(p.name) }">{{
+              initialOf(p.name)
+            }}</span>
+            <span class="name-text">#{{ p.spin_order }} — {{ p.name }}</span>
+          </span>
         </li>
       </ol>
       <button @click="emit('reset')" class="btn btn-reset">Reset All</button>
@@ -156,9 +182,65 @@ ol {
   background: rgba(255, 255, 255, 0.05);
 }
 
+.name-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.name-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Round identity token: deterministic per-name color matching the wheel
+   segment, with the participant's initial. */
+.identity-token {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: bold;
+  color: #2d3436;
+  text-decoration: none;
+}
+
 .participant-item.picked {
   opacity: 0.6;
   text-decoration: line-through;
+}
+
+/* Optimistic add: a settling skeleton chip that pulses until the server
+   confirms, then reconciles into a normal row. */
+.participant-item.pending {
+  opacity: 0.5;
+  animation: chip-pulse 1.1s ease-in-out infinite;
+}
+
+/* Failed add: shake briefly before the row is removed. */
+.participant-item.error {
+  color: #e74c3c;
+  background: rgba(231, 76, 60, 0.12);
+  animation: chip-shake 0.4s ease-in-out;
+}
+
+@keyframes chip-pulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 0.85; }
+}
+
+@keyframes chip-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-5px); }
+  40% { transform: translateX(5px); }
+  60% { transform: translateX(-3px); }
+  80% { transform: translateX(3px); }
 }
 
 .empty {

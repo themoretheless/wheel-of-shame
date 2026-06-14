@@ -71,7 +71,10 @@ async function attemptReconnect(gen: number) {
     session.value = data.session
     participants.value = data.participants
     error.value = null
-    reconnectAttempt = 0
+    // Don't reset the backoff here: the REST re-fetch succeeding doesn't mean
+    // the WebSocket will. Reset only once the socket actually opens (onOpen
+    // below), so a server that serves HTTP but drops the WS handshake still
+    // escalates the delay instead of looping at the base interval.
     console.log('[ws] session state re-synced, reopening websocket')
     ws.connect(id)
   } catch (e: any) {
@@ -89,6 +92,12 @@ async function attemptReconnect(gen: number) {
     scheduleReconnect()
   }
 }
+
+ws.onOpen(() => {
+  // A real open is the only success signal that clears the backoff, so the
+  // next unexpected drop starts the delay sequence over from the base.
+  reconnectAttempt = 0
+})
 
 ws.onUnexpectedClose(() => {
   scheduleReconnect()
@@ -124,10 +133,11 @@ ws.onMessage((event: any) => {
         suppressWsSpin = false
         break
       }
-      const idx = participants.value.findIndex((p) => p.id === event.picked.id)
-      if (idx !== -1) {
-        participants.value[idx] = event.picked
-      }
+      // Surface the result so App.vue can drive the wheel animation to this
+      // winner. Don't mark the picked participant removed yet: it must stay in
+      // activeParticipants until the spin lands, or the wheel would jump to the
+      // post-removal state. App.vue applies the removal on animation complete
+      // via applySpinResult().
       remoteSpinResult.value = {
         picked: event.picked,
         remaining: event.remaining,
@@ -189,15 +199,44 @@ export function useSession() {
   async function addName(name: string) {
     if (!session.value) return
     error.value = null
+    // Optimistic add (Linear-style): show a pending chip immediately, then
+    // reconcile its id once the server confirms. A unique temp id keeps the
+    // list/wheel :key stable and lets us find the row again on resolve.
+    const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    const temp: Participant = {
+      id: tempId,
+      session_id: session.value.id,
+      name,
+      removed: false,
+      pending: true,
+    }
+    participants.value.push(temp)
     try {
       const p = await api.addParticipant(session.value.id, name)
-      // WS will also deliver this; deduplicate in handler
+      const tempIdx = participants.value.findIndex((ep) => ep.id === tempId)
+      // The WS broadcast may have already delivered the real participant.
       const exists = participants.value.some((ep) => ep.id === p.id)
-      if (!exists) {
+      if (tempIdx !== -1) {
+        if (exists) {
+          // Real one arrived via WS; drop the temp placeholder.
+          participants.value.splice(tempIdx, 1)
+        } else {
+          // Reconcile in place so the row settles without a remount.
+          participants.value[tempIdx] = p
+        }
+      } else if (!exists) {
         participants.value.push(p)
       }
     } catch (e: any) {
       error.value = e.message
+      // Flag the temp row so the UI can shake it, then remove it shortly after.
+      const tempIdx = participants.value.findIndex((ep) => ep.id === tempId)
+      if (tempIdx !== -1) {
+        participants.value[tempIdx] = { ...temp, pending: false, error: true }
+        setTimeout(() => {
+          participants.value = participants.value.filter((ep) => ep.id !== tempId)
+        }, 600)
+      }
     }
   }
 

@@ -19,7 +19,24 @@ docker build -t "cr.yandex/${FOLDER_ID}/${REGISTRY_NAME}:${IMAGE_TAG}" .
 echo "=== Pushing to Yandex Container Registry ==="
 docker push "cr.yandex/${FOLDER_ID}/${REGISTRY_NAME}:${IMAGE_TAG}"
 
+# Persistence: the backend defaults to an in-memory store, which loses every
+# session whenever the container is replaced (deploy, scale, cold start). We
+# pin it to the SQLite backend so sessions survive a container restart.
+#
+# IMPORTANT: this only persists data if the SQLite file lives on durable
+# storage that a SINGLE instance owns. A serverless container's local
+# filesystem is ephemeral and is NOT shared between instances, so this
+# configuration assumes:
+#   - the container runs as a single instance (no horizontal fan-out), and
+#   - SQLITE_PATH points at a mounted persistent volume.
+# Mount a persistent volume at /data and keep the DB there. If you ever scale
+# past one instance, switch STORE_BACKEND to ydb instead. SQLITE_PATH is read
+# by build_sqlite() in backend/src/store/mod.rs.
+STORE_BACKEND="${STORE_BACKEND:-sqlite}"
+SQLITE_PATH="${SQLITE_PATH:-/data/wheel.db}"
+
 echo "=== Creating/updating Serverless Container ==="
+echo "Storage backend: ${STORE_BACKEND} (SQLITE_PATH=${SQLITE_PATH})"
 yc serverless container revision deploy \
   --container-name "${CONTAINER_NAME}" \
   --image "cr.yandex/${FOLDER_ID}/${REGISTRY_NAME}:${IMAGE_TAG}" \
@@ -27,6 +44,7 @@ yc serverless container revision deploy \
   --memory 128m \
   --concurrency 4 \
   --execution-timeout 30s \
+  --environment "STORE_BACKEND=${STORE_BACKEND},SQLITE_PATH=${SQLITE_PATH}" \
   --service-account-id "${SA_ID}" \
   --folder-id "${FOLDER_ID}"
 

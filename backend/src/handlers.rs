@@ -9,6 +9,13 @@ use crate::error::AppError;
 use crate::models::*;
 use crate::ws::SessionEvent;
 
+/// Maximum length, in characters, of a session title.
+const MAX_TITLE_LEN: usize = 200;
+/// Maximum length, in characters, of a participant name.
+const MAX_NAME_LEN: usize = 100;
+/// Maximum number of names accepted in a single batch request.
+const MAX_BATCH_NAMES: usize = 500;
+
 pub async fn health() -> &'static str {
     "ok"
 }
@@ -24,11 +31,17 @@ pub async fn create_session(
     State(state): State<AppState>,
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<(StatusCode, Json<Session>), AppError> {
-    if req.title.trim().is_empty() {
+    let title = req.title.trim();
+    if title.is_empty() {
         return Err(AppError::BadRequest("Title cannot be empty".into()));
     }
+    if title.chars().count() > MAX_TITLE_LEN {
+        return Err(AppError::BadRequest(format!(
+            "Title must be at most {MAX_TITLE_LEN} characters"
+        )));
+    }
 
-    let session = Session::new(req.title.trim().to_string());
+    let session = Session::new(title.to_string());
     state.store.create_session(&session).await?;
 
     Ok((StatusCode::CREATED, Json(session)))
@@ -57,13 +70,19 @@ pub async fn add_participant(
     Path(session_id): Path<String>,
     Json(req): Json<AddParticipantRequest>,
 ) -> Result<(StatusCode, Json<Participant>), AppError> {
-    if req.name.trim().is_empty() {
+    let name = req.name.trim();
+    if name.is_empty() {
         return Err(AppError::BadRequest("Name cannot be empty".into()));
+    }
+    if name.chars().count() > MAX_NAME_LEN {
+        return Err(AppError::BadRequest(format!(
+            "Name must be at most {MAX_NAME_LEN} characters"
+        )));
     }
 
     ensure_session_exists(&state, &session_id).await?;
 
-    let participant = Participant::new(session_id.clone(), req.name.trim().to_string());
+    let participant = Participant::new(session_id.clone(), name.to_string());
 
     state
         .store
@@ -91,15 +110,26 @@ pub async fn add_participants_batch(
     if req.names.is_empty() {
         return Err(AppError::BadRequest("Names list cannot be empty".into()));
     }
+    if req.names.len() > MAX_BATCH_NAMES {
+        return Err(AppError::BadRequest(format!(
+            "Cannot add more than {MAX_BATCH_NAMES} names at once"
+        )));
+    }
 
     ensure_session_exists(&state, &session_id).await?;
 
     let mut new_participants = Vec::new();
     for name in &req.names {
         let trimmed = name.trim();
-        if !trimmed.is_empty() {
-            new_participants.push(Participant::new(session_id.clone(), trimmed.to_string()));
+        if trimmed.is_empty() {
+            continue;
         }
+        if trimmed.chars().count() > MAX_NAME_LEN {
+            return Err(AppError::BadRequest(format!(
+                "Name must be at most {MAX_NAME_LEN} characters"
+            )));
+        }
+        new_participants.push(Participant::new(session_id.clone(), trimmed.to_string()));
     }
 
     state
@@ -184,15 +214,15 @@ pub async fn session_ws(
 ) -> Result<impl IntoResponse, AppError> {
     ensure_session_exists(&state, &session_id).await?;
 
-    let rx = state.hub.subscribe(&session_id).await;
+    let sub = state.hub.subscribe(&session_id).await;
 
-    Ok(ws.on_upgrade(move |socket| handle_ws(socket, rx)))
+    Ok(ws.on_upgrade(move |socket| handle_ws(socket, sub)))
 }
 
-async fn handle_ws(mut socket: WebSocket, mut rx: tokio::sync::broadcast::Receiver<String>) {
+async fn handle_ws(mut socket: WebSocket, mut sub: crate::ws::Subscription) {
     loop {
         tokio::select! {
-            msg = rx.recv() => {
+            msg = sub.recv() => {
                 match msg {
                     Ok(text) => {
                         if socket.send(Message::Text(text.into())).await.is_err() {
