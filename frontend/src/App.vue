@@ -641,7 +641,11 @@ function onGlobalKeydown(e: KeyboardEvent) {
   />
 
   <!-- UI overlay -->
-  <div class="overlay" :class="{ spinning }" :style="{ '--live-accent': liveAccent }">
+  <div
+    class="overlay"
+    :class="{ spinning, 'palette-dimmed': paletteOpen }"
+    :style="{ '--live-accent': liveAccent }"
+  >
     <header class="fire-header">
       <canvas ref="flameCanvas" class="flame-canvas"></canvas>
       <h1 class="fire-title">
@@ -877,6 +881,20 @@ function onGlobalKeydown(e: KeyboardEvent) {
   --spin-focus: 1;
 }
 
+/* Cmd-K backdrop ramp: while the command palette is open, the app chrome behind
+   it (the title header and the roster panel) softly blurs and dims, so the
+   palette reads as a focused layer floating above a recessed backdrop
+   (Raycast-style). The palette's own teleported overlay paints on top; this is
+   the underneath content easing back, visible at the palette's translucent
+   edges and through its open/close transition. The wheel itself stays crisp
+   (it's the background canvas, already darkened by the palette scrim), and we
+   target .list-section rather than the .main-layout flex parent so the filter
+   never turns that parent into a containing block for the fixed roster. */
+.palette-dimmed .fire-header,
+.palette-dimmed .list-section {
+  filter: blur(3px) brightness(0.7);
+}
+
 /* Register the custom property so it can be animated; without an @property
    declaration browsers treat it as a discrete string and the transition snaps.
    The class toggle still works as a fallback where @property is unsupported. */
@@ -950,6 +968,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
   position: relative;
   height: 80px;
   padding-right: 340px;
+  transition: filter 0.18s ease;
 }
 
 .flame-canvas {
@@ -1388,6 +1407,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
   width: 320px;
   max-height: calc(100vh - 100px);
   overflow-y: auto;
+  transition: filter 0.18s ease;
 }
 
 .panel {
@@ -1435,7 +1455,9 @@ function onGlobalKeydown(e: KeyboardEvent) {
 @media (prefers-reduced-motion: reduce) {
   .overlay,
   .overlay .panel,
-  .overlay .action-dock {
+  .overlay .action-dock,
+  .fire-header,
+  .list-section {
     transition: none;
   }
 }
