@@ -104,6 +104,13 @@ let spinDirection: 1 | -1 = 1
 let ambientLight: THREE.AmbientLight | null = null
 let keyLight: THREE.DirectionalLight | null = null
 let spotLight: THREE.PointLight | null = null
+// Velocity-reactive streak ring: a thin additive annulus parked at the rim,
+// invisible at rest. Its opacity and scale are driven each spin frame from the
+// per-frame angular delta so a fast spin smears a bright halo at the wheel's
+// edge, fading to nothing as it decelerates. Lives on pivotGroup (not
+// wheelGroup) so it stays a fixed ring while the wheel turns behind it.
+let streakRing: THREE.Mesh | null = null
+let streakRingMat: THREE.MeshBasicMaterial | null = null
 const ambientBaseIntensity = 0.7
 const keyBaseIntensity = 1.0
 let otFont: opentype.Font | null = null
@@ -1123,6 +1130,26 @@ function initScene() {
   wheelGroup = new THREE.Group()
   pivotGroup.add(wheelGroup)
 
+  // Velocity streak ring: a thin annulus hugging the rim, additive-blended so it
+  // reads as a glowing smear under the bloom pass when a fast spin lights it up.
+  // Parked transparent and invisible; the spin loop raises its opacity/scale.
+  // Skipped under reduced motion, where the bloom surge and slow-mo are all off.
+  if (!prefersReducedMotion()) {
+    const streakGeo = new THREE.RingGeometry(WHEEL_RADIUS - 0.04, WHEEL_RADIUS + 0.2, 96)
+    streakRingMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    })
+    streakRing = new THREE.Mesh(streakGeo, streakRingMat)
+    streakRing.position.z = WHEEL_DEPTH / 2 + 0.03
+    streakRing.visible = false
+    pivotGroup.add(streakRing)
+  }
+
   // Pointer is a flapper hinged above the rim. Its geometry hangs down from a
   // pivot at the local origin so rotating pegPivot.rotation.z swings the tip
   // sideways, letting it bounce off the pegs as the wheel turns.
@@ -1936,6 +1963,26 @@ function animateSpin() {
     prevWhooshRot = currentRotation
     updateWhoosh(whooshSpeed, t / SLOWMO_START)
 
+    // Velocity streak ring: map the per-frame angular delta to a 0..1 intensity
+    // (saturating around STREAK_REF rad/frame), gate it on the same surge curve
+    // as the bloom so it's already dark by SLOWMO_START, then drive the rim
+    // annulus's opacity and a slight outward bulge from it. Parked invisible at
+    // v~0 so it never shows at rest. streakRing is null under reduced motion.
+    if (streakRing && streakRingMat) {
+      const STREAK_REF = 0.5
+      const surge = Math.max(0, 1 - t / SLOWMO_START)
+      const v = Math.min(1, Math.abs(whooshSpeed) / STREAK_REF) * surge
+      if (v > 0.001) {
+        streakRing.visible = true
+        streakRingMat.opacity = 0.5 * v
+        const s = 1 + 0.12 * v
+        streakRing.scale.set(s, s, 1)
+      } else if (streakRing.visible) {
+        streakRing.visible = false
+        streakRingMat.opacity = 0
+      }
+    }
+
     if (camera && spinElapsed < camReturnDuration) {
       const ct = Math.min(spinElapsed / camReturnDuration, 1)
       const ce = 1 - Math.pow(1 - ct, 2)
@@ -1977,6 +2024,12 @@ function animateSpin() {
         }
         // Clear any residual showdown face tilt so the wheel rests flat.
         if (wheelGroup) wheelGroup.rotation.x = 0
+        // Park the velocity streak ring fully dark at rest in case the last
+        // frame carried residual speed.
+        if (streakRing && streakRingMat) {
+          streakRing.visible = false
+          streakRingMat.opacity = 0
+        }
         if (controls) {
           controls.update()
           controls.enabled = true
@@ -2245,6 +2298,8 @@ onBeforeUnmount(() => {
   if (sharedPegMat) sharedPegMat.dispose()
   if (countdownRing) countdownRing.geometry.dispose()
   if (countdownRingMat) countdownRingMat.dispose()
+  if (streakRing) streakRing.geometry.dispose()
+  if (streakRingMat) streakRingMat.dispose()
   whooshSource = null
   whooshFilter = null
   whooshGain = null
