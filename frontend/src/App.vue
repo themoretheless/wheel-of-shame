@@ -468,8 +468,37 @@ function onGlobalKeydown(e: KeyboardEvent) {
             {{ wsConnected ? 'Live' : 'Offline' }}
           </span>
           <span class="kbd-hint" title="Press Space to spin"><kbd>Space</kbd> to spin</span>
-          <button @click="copyLink" class="btn btn-small" title="Copy link">Share</button>
         </div>
+      </div>
+
+      <!-- Floating action dock: the primary controls (spin, share, command
+           palette) collected into one glass bar centered over the wheel
+           column, offset for the 340px right-side panel. -->
+      <div class="action-dock">
+        <button
+          @click="handleSpin"
+          class="btn btn-small dock-spin"
+          :disabled="spinning || activeParticipants.length === 0"
+          title="Spin the wheel"
+        >
+          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+            <path
+              d="M12 4V1L8 5l4 4V6a6 6 0 1 1-6 6H4a8 8 0 1 0 8-8z"
+              fill="currentColor"
+            />
+          </svg>
+          Spin
+        </button>
+        <button @click="copyLink" class="btn btn-small" title="Copy share link">
+          Share
+        </button>
+        <button
+          @click="paletteOpen = true"
+          class="btn btn-small"
+          title="Open command palette"
+        >
+          <kbd class="dock-kbd">⌘K</kbd>
+        </button>
       </div>
 
       <div class="main-layout">
@@ -695,6 +724,59 @@ function onGlobalKeydown(e: KeyboardEvent) {
 @media (max-width: 700px) {
   .reset-pill {
     left: 50%;
+  }
+}
+
+/* Floating action dock, anchored to the bottom of the wheel column. Shares the
+   glass pill styling with .reset-pill and the same 340px panel-offset centering
+   so it sits over the wheel rather than the screen center. */
+.action-dock {
+  position: fixed;
+  bottom: 28px;
+  left: calc((100% - 340px) / 2);
+  transform: translateX(-50%);
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-radius: 18px;
+  background: rgba(30, 30, 30, 0.78);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+}
+
+.action-dock .btn-small {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 12px;
+}
+
+.action-dock .btn-small:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.action-dock .btn-small:disabled:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.dock-spin {
+  color: #4ECDC4;
+  font-weight: bold;
+}
+
+.dock-kbd {
+  font-size: 11px;
+  font-family: inherit;
+  color: rgba(223, 230, 233, 0.85);
+}
+
+@media (max-width: 700px) {
+  .action-dock {
+    left: 50%;
+    bottom: calc(50vh + 12px);
   }
 }
 
