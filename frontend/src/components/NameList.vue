@@ -2,6 +2,7 @@
 import { ref, computed } from 'vue'
 import type { Participant } from '../types'
 import { identityColor } from '../utils/identity'
+import { parsePastedNames } from '../utils/roster'
 
 // First visible character, upper-cased, for the round identity token.
 function initialOf(name: string): string {
@@ -30,6 +31,34 @@ const emit = defineEmits<{
 }>()
 
 const nameInput = ref('')
+
+// Staged result of a multi-name paste, awaiting an explicit confirm so a big
+// roster lands in one reviewed batch rather than silently flooding the input.
+const pendingPaste = ref<string[] | null>(null)
+
+// Intercept a paste that carries more than one name (newline/comma/tab
+// separated) and stage it for confirmation instead of dumping raw text into the
+// field. A single pasted name falls through to the browser's default paste so
+// typing-then-Enter still works.
+function onPaste(event: ClipboardEvent) {
+  const text = event.clipboardData?.getData('text') ?? ''
+  if (!/[\n,\t]/.test(text)) return
+  const names = parsePastedNames(text, props.active.map((p) => p.name))
+  event.preventDefault()
+  pendingPaste.value = names.length > 0 ? names : null
+}
+
+function confirmPaste() {
+  if (pendingPaste.value && pendingPaste.value.length > 0) {
+    emit('add-batch', pendingPaste.value)
+  }
+  pendingPaste.value = null
+  nameInput.value = ''
+}
+
+function cancelPaste() {
+  pendingPaste.value = null
+}
 
 // Roster filter: rows that don't match stay in the DOM (so the odds bars keep
 // splitting evenly across every active name) but get a '.dimmed' class. Empty
@@ -81,10 +110,30 @@ function addName() {
       <input
         v-model="nameInput"
         @keyup.enter="addName"
-        placeholder="Name (or comma-separated list)"
+        @paste="onPaste"
+        placeholder="Name (or paste a list)"
         class="name-input"
       />
       <button @click="addName" class="btn btn-add">Add</button>
+    </div>
+
+    <!-- Bulk-paste confirm: a pasted multi-name blob is parsed and deduped, then
+         held here so the count can be reviewed before it lands as one batch. -->
+    <div v-if="pendingPaste" class="paste-confirm" role="status">
+      <template v-if="pendingPaste.length > 0">
+        <span class="paste-count">
+          Add {{ pendingPaste.length }} new
+          {{ pendingPaste.length === 1 ? 'name' : 'names' }}?
+        </span>
+        <div class="paste-actions">
+          <button @click="confirmPaste" class="btn btn-paste-add">Add</button>
+          <button @click="cancelPaste" class="btn btn-paste-cancel">Cancel</button>
+        </div>
+      </template>
+      <template v-else>
+        <span class="paste-count">No new names in that paste.</span>
+        <button @click="cancelPaste" class="btn btn-paste-cancel">Dismiss</button>
+      </template>
     </div>
 
     <div class="participants">
@@ -260,6 +309,73 @@ function addName() {
 
 .btn-add:hover {
   background: #45b7aa;
+}
+
+/* Bulk-paste confirm strip: a glass row between the input and the roster that
+   shows the parsed count and the Add/Cancel actions before committing. */
+.paste-confirm {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: -8px 0 16px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: rgba(78, 205, 196, 0.1);
+  border: 1px solid rgba(78, 205, 196, 0.3);
+  animation: paste-slide 0.22s ease both;
+}
+
+.paste-count {
+  font-size: 13px;
+  color: #dfe6e9;
+}
+
+.paste-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-paste-add {
+  background: #4ECDC4;
+  color: #2d3436;
+  padding: 7px 16px;
+  font-size: 13px;
+}
+
+.btn-paste-add:hover {
+  background: #45b7aa;
+}
+
+.btn-paste-cancel {
+  background: transparent;
+  color: #95a5a6;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  padding: 7px 14px;
+  font-size: 13px;
+}
+
+.btn-paste-cancel:hover {
+  color: #dfe6e9;
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+@keyframes paste-slide {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .paste-confirm {
+    animation: none;
+  }
 }
 
 .btn-remove {
