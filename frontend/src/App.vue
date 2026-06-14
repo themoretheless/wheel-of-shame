@@ -1,6 +1,13 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount, defineAsyncComponent } from 'vue'
-const WheelCanvas = defineAsyncComponent(() => import('./components/WheelCanvas.vue'))
+import WheelSkeleton from './components/WheelSkeleton.vue'
+const WheelCanvas = defineAsyncComponent({
+  loader: () => import('./components/WheelCanvas.vue'),
+  // Show the ring shimmer immediately so the wheel's slot is never blank while
+  // its three.js chunk downloads and the scene initializes.
+  loadingComponent: WheelSkeleton,
+  delay: 0,
+})
 import NameList from './components/NameList.vue'
 import SpinResultModal from './components/SpinResult.vue'
 import CommandPalette, { type Command } from './components/CommandPalette.vue'
