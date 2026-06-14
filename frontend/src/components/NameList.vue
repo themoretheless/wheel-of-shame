@@ -31,6 +31,14 @@ const emit = defineEmits<{
 
 const nameInput = ref('')
 
+// A ready-made roster offered on the empty state so a first-time session can be
+// populated in one click; routed through the same add-batch path as typed input.
+const SAMPLE_NAMES = ['Ada', 'Alan', 'Grace', 'Linus', 'Margaret', 'Dennis']
+
+function addSampleNames() {
+  emit('add-batch', SAMPLE_NAMES)
+}
+
 function addName() {
   const value = nameInput.value.trim()
   if (!value) return
@@ -95,7 +103,12 @@ function addName() {
           </button>
         </li>
       </TransitionGroup>
-      <p v-else class="empty">No participants yet</p>
+      <div v-else class="empty-card">
+        <span class="empty-mark" aria-hidden="true">○</span>
+        <p class="empty-title">No one's on the wheel yet</p>
+        <p class="empty-sub">Add names above, or drop in a sample roster to try a spin.</p>
+        <button @click="addSampleNames" class="btn btn-sample">Try sample names</button>
+      </div>
     </div>
 
     <div v-if="removed.length > 0" class="participants removed-list">
@@ -353,9 +366,55 @@ ol {
   80% { transform: translateX(3px); }
 }
 
-.empty {
-  color: #636e72;
-  font-style: italic;
+/* Empty state: a glass card that invites a first roster instead of a bare line
+   of italic text, with a one-click sample roster routed through add-batch. */
+.empty-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 6px;
+  padding: 24px 20px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px dashed rgba(255, 255, 255, 0.12);
+}
+
+.empty-mark {
+  font-size: 28px;
+  line-height: 1;
+  color: #4ECDC4;
+  opacity: 0.7;
+  margin-bottom: 2px;
+}
+
+.empty-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: bold;
+  color: #dfe6e9;
+}
+
+.empty-sub {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #95a5a6;
+  max-width: 240px;
+}
+
+.btn-sample {
+  margin-top: 10px;
+  background: rgba(78, 205, 196, 0.14);
+  color: #4ECDC4;
+  border: 1px solid rgba(78, 205, 196, 0.35);
+  padding: 9px 18px;
+  font-size: 13px;
+  transition: background 0.18s ease;
+}
+
+.btn-sample:hover {
+  background: rgba(78, 205, 196, 0.24);
 }
 
 .removed-list {
