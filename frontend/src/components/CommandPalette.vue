@@ -96,6 +96,36 @@ const activeIndex = ref(0)
 const inputRef = ref<HTMLInputElement | null>(null)
 const frecency = ref<Record<string, FrecencyEntry>>(loadFrecency())
 
+// Spotlight caret: a single highlight pill that slides between rows instead of
+// each row toggling its own background, so the selection reads as one object
+// gliding through the list (Raycast-style). The list element is the positioning
+// context; itemRefs collects only the command rows (group headers are skipped)
+// so the caret can be measured against the active command's box. Rows report
+// offsetTop relative to the list (its offset parent), so no list ref is needed.
+const itemRefs = ref<HTMLLIElement[]>([])
+const caretTop = ref(0)
+const caretHeight = ref(0)
+const caretVisible = ref(false)
+
+function setItemRef(el: Element | null, index: number) {
+  if (el) itemRefs.value[index] = el as HTMLLIElement
+}
+
+// Measure the active row and move the caret over it. Runs after the DOM settles
+// (nextTick) so freshly filtered rows are laid out before we read their boxes.
+function updateCaret() {
+  void nextTick(() => {
+    const el = itemRefs.value[activeIndex.value]
+    if (!el || filtered.value.length === 0) {
+      caretVisible.value = false
+      return
+    }
+    caretTop.value = el.offsetTop
+    caretHeight.value = el.offsetHeight
+    caretVisible.value = true
+  })
+}
+
 // Bump a command's frecency on use and persist. Called from both the regular
 // run path and the inline-submit path so inline commands count too.
 function recordUse(id: string) {
@@ -173,7 +203,14 @@ watch(
       activeIndex.value = 0
       inlineCommand.value = null
       inlineValue.value = ''
-      void nextTick(() => inputRef.value?.focus())
+      void nextTick(() => {
+        inputRef.value?.focus()
+        updateCaret()
+      })
+    } else {
+      // Hide the caret on close so it doesn't flash at a stale position the next
+      // time the palette pops open before the watchers re-measure.
+      caretVisible.value = false
     }
   },
 )
@@ -183,6 +220,20 @@ watch(filtered, (list) => {
   if (activeIndex.value >= list.length) {
     activeIndex.value = Math.max(0, list.length - 1)
   }
+  // Drop stale element refs from the previous (longer) list so the caret never
+  // measures a row that no longer exists.
+  itemRefs.value.length = list.length
+})
+
+// Reposition the caret whenever the highlight moves or the rows re-render (query
+// edits, frecency reordering). Suspend it in inline mode, where the list is
+// replaced by a single field.
+watch([activeIndex, rows, inlineCommand], () => {
+  if (inlineCommand.value) {
+    caretVisible.value = false
+    return
+  }
+  updateCaret()
 })
 
 function runActive() {
@@ -277,7 +328,7 @@ function onKeydown(e: KeyboardEvent) {
             />
           </div>
           <ul class="palette-list">
-            <li class="palette-item active" @click="submitInline">
+            <li class="palette-item palette-item-static" @click="submitInline">
               <span class="palette-text">
                 <span class="palette-label">
                   {{ inlineValue.trim() ? `Confirm "${inlineValue.trim()}"` : 'Type a value...' }}
@@ -297,11 +348,22 @@ function onKeydown(e: KeyboardEvent) {
             @keydown="onKeydown"
           />
           <ul class="palette-list">
+            <!-- One spotlight pill that slides between rows; its top/height are
+                 measured from the active row so it glides as the highlight moves
+                 instead of each row flicking its own background. -->
+            <div
+              v-show="caretVisible"
+              class="palette-caret"
+              :style="{ top: `${caretTop}px`, height: `${caretHeight}px` }"
+              aria-hidden="true"
+            ></div>
             <template v-for="(row, i) in rows" :key="row.c.id">
               <li v-if="row.header" class="palette-group">{{ row.header }}</li>
               <li
+                :ref="(el) => setItemRef(el as Element | null, i)"
                 class="palette-item"
                 :class="{ active: i === activeIndex }"
+                :aria-selected="i === activeIndex"
                 @mouseenter="activeIndex = i"
                 @click="runActive"
               >
@@ -424,6 +486,30 @@ function onKeydown(e: KeyboardEvent) {
   padding: 6px;
   max-height: 320px;
   overflow-y: auto;
+  /* Positioning context for the spotlight caret, which is offset from the list's
+     padding box (matching the rows' offsetTop reads). */
+  position: relative;
+}
+
+/* The single highlight pill that tracks the active row. Sits behind the rows
+   (which get position/z-index below) and eases between measured top/height. */
+.palette-caret {
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  border-radius: 8px;
+  background: rgba(78, 205, 196, 0.18);
+  pointer-events: none;
+  z-index: 0;
+  transition:
+    top 0.16s cubic-bezier(0.22, 1, 0.36, 1),
+    height 0.16s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .palette-caret {
+    transition: none;
+  }
 }
 
 /* Sticky section header that rides the top of the scroll area as its group
@@ -450,9 +536,14 @@ function onKeydown(e: KeyboardEvent) {
   border-radius: 8px;
   cursor: pointer;
   color: #dfe6e9;
+  /* Lift rows above the caret so their text sits on top of the moving pill. */
+  position: relative;
+  z-index: 1;
 }
 
-.palette-item.active {
+/* Inline-entry mode has no sliding caret (a single confirm row), so it carries
+   its own static highlight, matching the caret's tint. */
+.palette-item-static {
   background: rgba(78, 205, 196, 0.18);
 }
 
