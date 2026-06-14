@@ -50,9 +50,19 @@ function addName() {
     <div class="participants">
       <h3>Active ({{ active.length }})</h3>
       <ul v-if="active.length > 0">
-        <li v-for="p in active" :key="p.id" class="participant-item">
+        <li
+          v-for="p in active"
+          :key="p.id"
+          class="participant-item"
+          :class="{ pending: p.pending, error: p.error }"
+        >
           <span>{{ p.name }}</span>
-          <button @click="emit('remove', p.id)" class="btn btn-remove" title="Remove">
+          <button
+            v-if="!p.pending"
+            @click="emit('remove', p.id)"
+            class="btn btn-remove"
+            title="Remove"
+          >
             &times;
           </button>
         </li>
@@ -159,6 +169,33 @@ ol {
 .participant-item.picked {
   opacity: 0.6;
   text-decoration: line-through;
+}
+
+/* Optimistic add: a settling skeleton chip that pulses until the server
+   confirms, then reconciles into a normal row. */
+.participant-item.pending {
+  opacity: 0.5;
+  animation: chip-pulse 1.1s ease-in-out infinite;
+}
+
+/* Failed add: shake briefly before the row is removed. */
+.participant-item.error {
+  color: #e74c3c;
+  background: rgba(231, 76, 60, 0.12);
+  animation: chip-shake 0.4s ease-in-out;
+}
+
+@keyframes chip-pulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 0.85; }
+}
+
+@keyframes chip-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-5px); }
+  40% { transform: translateX(5px); }
+  60% { transform: translateX(-3px); }
+  80% { transform: translateX(3px); }
 }
 
 .empty {

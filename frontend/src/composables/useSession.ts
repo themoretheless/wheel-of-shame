@@ -190,15 +190,44 @@ export function useSession() {
   async function addName(name: string) {
     if (!session.value) return
     error.value = null
+    // Optimistic add (Linear-style): show a pending chip immediately, then
+    // reconcile its id once the server confirms. A unique temp id keeps the
+    // list/wheel :key stable and lets us find the row again on resolve.
+    const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    const temp: Participant = {
+      id: tempId,
+      session_id: session.value.id,
+      name,
+      removed: false,
+      pending: true,
+    }
+    participants.value.push(temp)
     try {
       const p = await api.addParticipant(session.value.id, name)
-      // WS will also deliver this; deduplicate in handler
+      const tempIdx = participants.value.findIndex((ep) => ep.id === tempId)
+      // The WS broadcast may have already delivered the real participant.
       const exists = participants.value.some((ep) => ep.id === p.id)
-      if (!exists) {
+      if (tempIdx !== -1) {
+        if (exists) {
+          // Real one arrived via WS; drop the temp placeholder.
+          participants.value.splice(tempIdx, 1)
+        } else {
+          // Reconcile in place so the row settles without a remount.
+          participants.value[tempIdx] = p
+        }
+      } else if (!exists) {
         participants.value.push(p)
       }
     } catch (e: any) {
       error.value = e.message
+      // Flag the temp row so the UI can shake it, then remove it shortly after.
+      const tempIdx = participants.value.findIndex((ep) => ep.id === tempId)
+      if (tempIdx !== -1) {
+        participants.value[tempIdx] = { ...temp, pending: false, error: true }
+        setTimeout(() => {
+          participants.value = participants.value.filter((ep) => ep.id !== tempId)
+        }, 600)
+      }
     }
   }
 
