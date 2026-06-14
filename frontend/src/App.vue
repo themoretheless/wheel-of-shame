@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, watch, onMounted, onBeforeUnmount, defineAsyncComponent } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, defineAsyncComponent } from 'vue'
 const WheelCanvas = defineAsyncComponent(() => import('./components/WheelCanvas.vue'))
 import NameList from './components/NameList.vue'
 import SpinResultModal from './components/SpinResult.vue'
+import CommandPalette, { type Command } from './components/CommandPalette.vue'
 import { useSession } from './composables/useSession'
 
 const {
@@ -216,11 +217,13 @@ onMounted(() => {
     if (id) load(id)
   }
   initFlame()
+  window.addEventListener('keydown', onGlobalKeydown)
 })
 
 onBeforeUnmount(() => {
   cancelAnimationFrame(flameAnimId)
   flameCleanup?.()
+  window.removeEventListener('keydown', onGlobalKeydown)
 })
 
 // A SpinResult from another client: drive the wheel to that winner with the
@@ -293,6 +296,56 @@ function copyLink() {
   if (!session.value) return
   const url = `${window.location.origin}${window.location.pathname}#/${session.value.id}`
   navigator.clipboard.writeText(url)
+}
+
+// --- Command palette (Cmd-K / Ctrl-K) ---
+const paletteOpen = ref(false)
+
+const paletteCommands = computed<Command[]>(() => [
+  {
+    id: 'spin',
+    label: 'Spin the wheel',
+    hint: 'Spin',
+    disabled: spinning.value || activeParticipants.value.length === 0,
+    run: () => {
+      handleSpin()
+    },
+  },
+  {
+    id: 'add',
+    label: 'Add a name',
+    hint: 'New participant',
+    disabled: !session.value,
+    run: () => {
+      const name = window.prompt('Name to add')?.trim()
+      if (name) addName(name)
+    },
+  },
+  {
+    id: 'reset',
+    label: 'Reset the wheel',
+    hint: 'Restore everyone',
+    disabled: !session.value || removedParticipants.value.length === 0,
+    run: () => {
+      reset()
+    },
+  },
+  {
+    id: 'copy-link',
+    label: 'Copy share link',
+    hint: 'Share',
+    disabled: !session.value,
+    run: () => {
+      copyLink()
+    },
+  },
+])
+
+function onGlobalKeydown(e: KeyboardEvent) {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault()
+    paletteOpen.value = !paletteOpen.value
+  }
 }
 </script>
 
@@ -376,6 +429,12 @@ function copyLink() {
       @close="dismissWinner"
     />
   </Teleport>
+
+  <CommandPalette
+    :open="paletteOpen"
+    :commands="paletteCommands"
+    @close="paletteOpen = false"
+  />
 </template>
 
 <style scoped>
