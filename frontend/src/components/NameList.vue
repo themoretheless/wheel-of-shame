@@ -48,6 +48,9 @@ const emit = defineEmits<{
   (e: 'add-batch', names: string[]): void
   (e: 'remove', id: string): void
   (e: 'reset'): void
+  // Id of the active row the cursor is over (null on leave), so the wheel can
+  // lift the matching segment as a hover peek.
+  (e: 'hover-name', id: string | null): void
 }>()
 
 const nameInput = ref('')
@@ -197,6 +200,8 @@ function addName() {
             '--odds-color': identityColor(p.name),
             '--tick-color': identityColor(p.name),
           }"
+          @mouseenter="emit('hover-name', p.id)"
+          @mouseleave="emit('hover-name', null)"
         >
           <span class="name-cell">
             <span class="identity-token" :style="{ background: identityColor(p.name) }">{{

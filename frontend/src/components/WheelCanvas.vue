@@ -15,6 +15,10 @@ const props = defineProps<{
   participants: Participant[]
   spinning: boolean
   winnerId: string | null
+  // Participant id of the roster row the cursor is hovering (null when none), so
+  // the matching wheel segment lifts and glows in sympathy. Reuses the same
+  // pointer-hover ease path as on-canvas hovering.
+  peekId?: string | null
 }>()
 
 const emit = defineEmits<{
@@ -2313,6 +2317,22 @@ function onCanvasMouseMove(e: MouseEvent) {
   }
   setHoveredSegment(segHit)
 }
+
+// Roster hover peek: when a NameList row is hovered, lift the matching wheel
+// segment through the same eased hover path the on-canvas pointer uses. Skipped
+// during a spin/reveal (segHoverFrame already gates the lift on those), and a
+// real canvas mousemove will override this the moment the cursor enters the
+// scene. A missing/removed id (or null) just clears any peek lift.
+watch(
+  () => props.peekId,
+  (id) => {
+    if (props.spinning || isSpinAnimating) return
+    const seg = id
+      ? segmentMeshes.find((m) => m?.userData?.participantId === id) ?? null
+      : null
+    setHoveredSegment(seg)
+  },
+)
 
 watch(
   () => props.participants.filter((p) => !p.removed).map((p) => p.id + ':' + p.name).join('|'),

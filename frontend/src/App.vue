@@ -53,6 +53,9 @@ const cameraDrifted = ref(false)
 // Participant id whose wheel segment is currently under the pointer mid-spin;
 // NameList flashes the matching roster row in sync. Null when not spinning.
 const tickingId = ref<string | null>(null)
+// Participant id of the roster row the cursor is hovering (null when none);
+// forwarded to WheelCanvas so the matching wheel segment lifts as a hover peek.
+const peekId = ref<string | null>(null)
 // Identity color of the segment currently under the pointer, pulled through the
 // chrome as the --live-accent CSS var: the dock gains a thin accent bar and the
 // spin vignette's inner stop warms toward this hue, so the active name's color
@@ -398,6 +401,10 @@ function onTickSegment(participantId: string | null) {
   tickingId.value = participantId
 }
 
+function onHoverName(id: string | null) {
+  peekId.value = id
+}
+
 function resetView() {
   wheelRef.value?.resetView()
 }
@@ -557,6 +564,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
     :participants="activeParticipants"
     :spinning="spinning"
     :winner-id="winnerId"
+    :peek-id="peekId"
     @spin-complete="onSpinComplete"
     @spin-click="handleSpin"
     @winner-reveal="onWinnerReveal"
@@ -705,6 +713,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
               @add="addName"
               @add-batch="addNames"
               @remove="removeName"
+              @hover-name="onHoverName"
             @reset="reset"
             />
           </div>
