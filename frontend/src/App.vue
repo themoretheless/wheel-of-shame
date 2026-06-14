@@ -5,6 +5,7 @@ import NameList from './components/NameList.vue'
 import SpinResultModal from './components/SpinResult.vue'
 import CommandPalette, { type Command } from './components/CommandPalette.vue'
 import { useSession } from './composables/useSession'
+import { identityColor } from './utils/identity'
 
 const {
   session,
@@ -468,6 +469,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
       v-if="winnerData"
       :name="winnerData.name"
       :remaining="winnerData.remaining"
+      :color="identityColor(winnerData.name)"
       @close="dismissWinner"
     />
   </Teleport>

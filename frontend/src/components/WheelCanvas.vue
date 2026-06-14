@@ -42,6 +42,13 @@ let spinBtnLeft: THREE.Mesh | null = null
 let spinBtnRight: THREE.Mesh | null = null
 let raycaster: THREE.Raycaster | null = null
 let spinDirection: 1 | -1 = 1
+// Scene lights held at module scope so the winner reveal can dim the room and
+// raise a per-winner spotlight, then restore them on dismiss.
+let ambientLight: THREE.AmbientLight | null = null
+let keyLight: THREE.DirectionalLight | null = null
+let spotLight: THREE.PointLight | null = null
+const ambientBaseIntensity = 0.7
+const keyBaseIntensity = 1.0
 let otFont: opentype.Font | null = null
 let animFrameId = 0
 
@@ -937,10 +944,11 @@ function initScene() {
   controls.maxPolarAngle = Math.PI - 0.3
   controls.addEventListener('change', markDirty)
 
-  scene.add(new THREE.AmbientLight(0xffffff, 0.7))
-  const key = new THREE.DirectionalLight(0xffffff, 1.0)
-  key.position.set(2, 4, 8)
-  scene.add(key)
+  ambientLight = new THREE.AmbientLight(0xffffff, ambientBaseIntensity)
+  scene.add(ambientLight)
+  keyLight = new THREE.DirectionalLight(0xffffff, keyBaseIntensity)
+  keyLight.position.set(2, 4, 8)
+  scene.add(keyLight)
   const fill = new THREE.DirectionalLight(0x8899cc, 0.35)
   fill.position.set(-3, -2, 6)
   scene.add(fill)
@@ -949,6 +957,12 @@ function initScene() {
   const specLight = new THREE.PointLight(0xffffff, 3, 20)
   specLight.position.set(0, 2, 6)
   scene.add(specLight)
+
+  // Per-winner spotlight: parked dark in front of the wheel, tinted to the
+  // winner's identity color and ramped up while the room dims on reveal.
+  spotLight = new THREE.PointLight(0xffffff, 0, 30)
+  spotLight.position.set(0, 0, 5)
+  scene.add(spotLight)
 
   // Pivot group — holds wheel + pointer, shifted so center aligns
   // between left edge and the right-side menu panel
@@ -1197,6 +1211,15 @@ function animateWinnerReveal(
   }
   const glow = seg.material as THREE.MeshStandardMaterial
 
+  // Spotlight reveal: tint a front PointLight to the winner's identity color
+  // and dim the ambient/key lights so the lifted slice reads like it is under
+  // a keynote spotlight. Skipped under reduced motion (the lift itself is
+  // already collapsed and the bloom pass is off).
+  const spotlightReveal = !prefersReducedMotion() && spotLight !== null
+  if (spotlightReveal && spotLight) {
+    spotLight.color.set(identityColor(winnerName))
+  }
+
   const startZ = -WHEEL_DEPTH / 2
   const duration = 500
   const startTime = performance.now()
@@ -1207,6 +1230,13 @@ function animateWinnerReveal(
     const eased = 1 - Math.pow(1 - t, 3) * Math.cos(t * Math.PI * 2)
     seg!.position.z = startZ + 0.4 * eased
     glow.emissiveIntensity = 0.9 * Math.min(t, 1)
+
+    if (spotlightReveal) {
+      const lt = Math.min(t, 1)
+      if (ambientLight) ambientLight.intensity = ambientBaseIntensity * (1 - 0.55 * lt)
+      if (keyLight) keyLight.intensity = keyBaseIntensity * (1 - 0.45 * lt)
+      if (spotLight) spotLight.intensity = 4 * lt
+    }
 
     if (t < 1) {
       requestAnimationFrame(frame)
@@ -1221,12 +1251,41 @@ function animateWinnerReveal(
   requestAnimationFrame(frame)
 }
 
+// Ease the dimmed room back to full and fade the winner spotlight out.
+function restoreLights() {
+  if (!spotLight || spotLight.intensity <= 0.001) {
+    if (ambientLight) ambientLight.intensity = ambientBaseIntensity
+    if (keyLight) keyLight.intensity = keyBaseIntensity
+    return
+  }
+  const duration = 400
+  const startTime = performance.now()
+  const startAmbient = ambientLight?.intensity ?? ambientBaseIntensity
+  const startKey = keyLight?.intensity ?? keyBaseIntensity
+  const startSpot = spotLight.intensity
+  function frame(now: number) {
+    markDirty()
+    const t = Math.min((now - startTime) / duration, 1)
+    if (ambientLight) ambientLight.intensity = startAmbient + (ambientBaseIntensity - startAmbient) * t
+    if (keyLight) keyLight.intensity = startKey + (keyBaseIntensity - startKey) * t
+    if (spotLight) spotLight.intensity = startSpot * (1 - t)
+    if (t < 1) {
+      requestAnimationFrame(frame)
+    } else if (spotLight) {
+      spotLight.intensity = 0
+    }
+  }
+  requestAnimationFrame(frame)
+}
+
 // Called from parent to dismiss the winner and start shrink
 function dismissWinner() {
   const winnerId = pendingWinnerId
   const onDismiss = pendingOnDismiss
   pendingWinnerId = null
   pendingOnDismiss = null
+
+  restoreLights()
 
   if (winnerId && onDismiss) {
     animateSegmentShrink(winnerId, onDismiss)

@@ -2,6 +2,7 @@
 defineProps<{
   name: string
   remaining: number
+  color: string
 }>()
 
 const emit = defineEmits<{
@@ -10,81 +11,108 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <div class="modal-overlay" @click.self="emit('close')">
-    <div class="result-card">
-      <div class="emoji">🎯</div>
-      <h2>{{ name }}</h2>
-      <p class="remaining">{{ remaining }} remaining</p>
+  <div class="lower-third-wrap" @click.self="emit('close')">
+    <div class="lower-third" :style="{ '--accent': color }">
+      <div class="accent-bar"></div>
+      <div class="info">
+        <span class="eyebrow">Winner</span>
+        <h2>{{ name }}</h2>
+        <p class="remaining">{{ remaining }} remaining</p>
+      </div>
       <button @click="emit('close')" class="btn-close">Continue</button>
     </div>
   </div>
 </template>
 
 <style scoped>
-.modal-overlay {
+.lower-third-wrap {
   position: fixed;
-  top: 0;
-  left: 0;
-  width: 100vw;
-  height: 100vh;
-  background: rgba(0, 0, 0, 0.7);
-  display: flex;
-  justify-content: center;
-  align-items: center;
+  inset: 0;
   z-index: 9999;
-  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 0 0 8vh;
   pointer-events: auto;
 }
 
-.result-card {
-  background: #2d3436;
-  border: 2px solid #4ECDC4;
-  border-radius: 16px;
-  padding: 40px 60px;
-  text-align: center;
-  animation: pop 0.3s ease-out;
+.lower-third {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  background: rgba(30, 30, 30, 0.82);
+  border-radius: 12px;
+  padding: 20px 28px 20px 0;
+  min-width: 360px;
+  max-width: min(90vw, 640px);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+  animation: slide-up 0.4s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-@keyframes pop {
+.accent-bar {
+  flex: 0 0 6px;
+  align-self: stretch;
+  background: var(--accent);
+  box-shadow: 0 0 16px var(--accent);
+}
+
+.info {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.eyebrow {
+  display: block;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent);
+  font-weight: 700;
+  margin-bottom: 2px;
+}
+
+@keyframes slide-up {
   from {
-    transform: scale(0.5);
+    transform: translateY(24px);
     opacity: 0;
   }
   to {
-    transform: scale(1);
+    transform: translateY(0);
     opacity: 1;
   }
 }
 
-.emoji {
-  font-size: 48px;
-  margin-bottom: 12px;
-}
-
 h2 {
-  font-size: 32px;
-  color: #FF6B6B;
-  margin: 0 0 8px;
+  font-size: 30px;
+  color: #f5f6fa;
+  margin: 0;
+  line-height: 1.1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .remaining {
-  color: #636e72;
-  font-size: 14px;
-  margin: 0 0 24px;
+  color: #95a5a6;
+  font-size: 13px;
+  margin: 4px 0 0;
 }
 
 .btn-close {
-  padding: 12px 32px;
+  flex: 0 0 auto;
+  padding: 12px 28px;
   border: none;
   border-radius: 8px;
-  background: #4ECDC4;
-  color: #2d3436;
+  background: var(--accent);
+  color: #1e1e1e;
   font-weight: bold;
-  font-size: 16px;
+  font-size: 15px;
   cursor: pointer;
 }
 
 .btn-close:hover {
-  background: #45b7aa;
+  filter: brightness(1.08);
 }
 </style>
