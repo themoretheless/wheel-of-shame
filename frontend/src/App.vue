@@ -11,6 +11,7 @@ const WheelCanvas = defineAsyncComponent({
 import NameList from './components/NameList.vue'
 import SpinResultModal from './components/SpinResult.vue'
 import CommandPalette, { type Command } from './components/CommandPalette.vue'
+import ShortcutsSheet from './components/ShortcutsSheet.vue'
 import { useSession } from './composables/useSession'
 import { identityColor } from './utils/identity'
 
@@ -378,6 +379,9 @@ function copyLink() {
 // --- Command palette (Cmd-K / Ctrl-K) ---
 const paletteOpen = ref(false)
 
+// Keyboard cheat-sheet toggled with '?'. Its rows mirror onGlobalKeydown below.
+const shortcutsOpen = ref(false)
+
 const paletteCommands = computed<Command[]>(() => [
   {
     id: 'spin',
@@ -471,7 +475,20 @@ function onGlobalKeydown(e: KeyboardEvent) {
   // The command palette owns the keyboard while it's open (Escape closes it).
   if (paletteOpen.value) return
 
-  if (e.code === 'Space' && !isEditableTarget(e.target)) {
+  // The cheat-sheet captures Escape to close itself; everything else is inert
+  // beneath it, so handle that case before the shortcuts it documents.
+  if (shortcutsOpen.value) {
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      shortcutsOpen.value = false
+    }
+    return
+  }
+
+  if (e.key === '?' && !isEditableTarget(e.target)) {
+    e.preventDefault()
+    shortcutsOpen.value = true
+  } else if (e.code === 'Space' && !isEditableTarget(e.target)) {
     e.preventDefault()
     // Don't spin underneath the winner modal: Space is inert until dismissed.
     if (!winnerData.value) handleSpin()
@@ -550,6 +567,14 @@ function onGlobalKeydown(e: KeyboardEvent) {
             {{ wsConnected ? 'Live' : 'Offline' }}
           </span>
           <span class="kbd-hint" title="Press Space to spin"><kbd>Space</kbd> to spin</span>
+          <button
+            class="kbd-hint-btn"
+            title="Keyboard shortcuts"
+            aria-label="Keyboard shortcuts"
+            @click="shortcutsOpen = true"
+          >
+            <kbd>?</kbd>
+          </button>
         </div>
       </div>
 
@@ -653,6 +678,8 @@ function onGlobalKeydown(e: KeyboardEvent) {
     :commands="paletteCommands"
     @close="paletteOpen = false"
   />
+
+  <ShortcutsSheet :open="shortcutsOpen" @close="shortcutsOpen = false" />
 </template>
 
 <style scoped>
@@ -981,6 +1008,21 @@ function onGlobalKeydown(e: KeyboardEvent) {
   gap: 5px;
   font-size: 11px;
   color: rgba(223, 230, 233, 0.6);
+}
+
+/* The '?' chip reuses the kbd look but is a real button so the cheat sheet is
+   reachable by mouse, not just the keyboard it documents. */
+.kbd-hint-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.kbd-hint-btn:hover kbd {
+  background: rgba(255, 255, 255, 0.18);
 }
 
 @media (max-width: 700px) {
