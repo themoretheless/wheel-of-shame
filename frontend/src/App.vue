@@ -476,7 +476,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
   />
 
   <!-- UI overlay -->
-  <div class="overlay">
+  <div class="overlay" :class="{ spinning }">
     <header class="fire-header">
       <canvas ref="flameCanvas" class="flame-canvas"></canvas>
       <h1 class="fire-title">
@@ -640,6 +640,24 @@ function onGlobalKeydown(e: KeyboardEvent) {
   min-height: 100vh;
   padding: 20px;
   pointer-events: none;
+  /* Drives the pre-spin focus vignette: the scrim and roster/dock dimming all
+     ramp off this single value, lerped 0 -> 1 while the wheel is spinning so
+     the chrome recedes and the wheel reads as the subject (keynote-style). */
+  --spin-focus: 0;
+  transition: --spin-focus 0.45s ease;
+}
+
+.overlay.spinning {
+  --spin-focus: 1;
+}
+
+/* Register the custom property so it can be animated; without an @property
+   declaration browsers treat it as a discrete string and the transition snaps.
+   The class toggle still works as a fallback where @property is unsupported. */
+@property --spin-focus {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 0;
 }
 
 /* Frosted scrim: a fixed darkening layer that sits above the 3D wheel
@@ -655,6 +673,14 @@ function onGlobalKeydown(e: KeyboardEvent) {
   z-index: -1;
   pointer-events: none;
   background:
+    /* Pre-spin focus layer: a center-weighted vignette that fades up only while
+       spinning (alpha keyed to --spin-focus), pulling edge contrast down so the
+       wheel pops. Sits first so the resting scrims below still read normally. */
+    radial-gradient(
+      ellipse 75% 75% at center,
+      transparent 40%,
+      rgba(0, 0, 0, calc(0.5 * var(--spin-focus))) 100%
+    ),
     radial-gradient(
       ellipse at right,
       rgba(0, 0, 0, 0.45),
@@ -868,6 +894,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
   background: rgba(30, 30, 30, 0.78);
   backdrop-filter: blur(8px);
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+  transition: opacity 0.45s ease, filter 0.45s ease;
 }
 
 .action-dock .btn-small {
@@ -1000,6 +1027,15 @@ function onGlobalKeydown(e: KeyboardEvent) {
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 16px;
   padding: 20px;
+  transition: opacity 0.45s ease, filter 0.45s ease;
+}
+
+/* While spinning, the roster and dock recede so attention stays on the wheel.
+   They keep pointer-events so a mid-spin edit still works, just visually muted. */
+.overlay.spinning .panel,
+.overlay.spinning .action-dock {
+  opacity: 0.55;
+  filter: saturate(0.7) brightness(0.85);
 }
 
 
@@ -1022,6 +1058,16 @@ function onGlobalKeydown(e: KeyboardEvent) {
   .wheel-section {
     min-height: 40vh;
     margin-right: 0;
+  }
+}
+
+/* Honor reduced-motion: keep the focus dim as a static state but drop the
+   ramp so it snaps instead of animating. */
+@media (prefers-reduced-motion: reduce) {
+  .overlay,
+  .overlay .panel,
+  .overlay .action-dock {
+    transition: none;
   }
 }
 </style>
