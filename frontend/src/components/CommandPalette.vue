@@ -5,10 +5,38 @@ export interface Command {
   id: string
   label: string
   hint?: string
+  // A secondary line under the label (e.g. a participant's win odds).
+  subtitle?: string
   // Returning false keeps the palette open (e.g. an inline name entry that
   // wants another value); anything else closes it.
   run: () => void | boolean
   disabled?: boolean
+}
+
+// Subsequence fuzzy match: every query char must appear in order. Returns a
+// score (higher is better) or -1 when there's no match. Consecutive hits and
+// matches at a word boundary are rewarded so close labels rank first.
+function fuzzyScore(text: string, query: string): number {
+  let score = 0
+  let ti = 0
+  let prevMatch = -2
+  for (let qi = 0; qi < query.length; qi++) {
+    const qc = query[qi]
+    let found = -1
+    for (; ti < text.length; ti++) {
+      if (text[ti] === qc) {
+        found = ti
+        break
+      }
+    }
+    if (found === -1) return -1
+    score += 1
+    if (found === prevMatch + 1) score += 2
+    if (found === 0 || text[found - 1] === ' ') score += 2
+    prevMatch = found
+    ti = found + 1
+  }
+  return score
 }
 
 const props = defineProps<{
@@ -28,11 +56,17 @@ const filtered = computed(() => {
   const q = query.value.trim().toLowerCase()
   const list = props.commands.filter((c) => !c.disabled)
   if (!q) return list
-  return list.filter(
-    (c) =>
-      c.label.toLowerCase().includes(q) ||
-      (c.hint ? c.hint.toLowerCase().includes(q) : false),
-  )
+  // Fuzzy-match against the best of label/hint/subtitle, then rank by score so
+  // the closest command floats to the top regardless of source field.
+  return list
+    .map((c) => {
+      const fields = [c.label, c.hint, c.subtitle].filter(Boolean) as string[]
+      const score = Math.max(...fields.map((f) => fuzzyScore(f.toLowerCase(), q)))
+      return { c, score }
+    })
+    .filter((entry) => entry.score >= 0)
+    .sort((a, b) => b.score - a.score)
+    .map((entry) => entry.c)
 })
 
 // Reset to a clean state and focus the input each time the palette opens.
@@ -104,7 +138,10 @@ function onKeydown(e: KeyboardEvent) {
             @mouseenter="activeIndex = i"
             @click="runActive"
           >
-            <span class="palette-label">{{ cmd.label }}</span>
+            <span class="palette-text">
+              <span class="palette-label">{{ cmd.label }}</span>
+              <span v-if="cmd.subtitle" class="palette-subtitle">{{ cmd.subtitle }}</span>
+            </span>
             <span v-if="cmd.hint" class="palette-hint">{{ cmd.hint }}</span>
           </li>
           <li v-if="filtered.length === 0" class="palette-empty">
@@ -192,8 +229,23 @@ function onKeydown(e: KeyboardEvent) {
   background: rgba(78, 205, 196, 0.18);
 }
 
+.palette-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
 .palette-label {
   font-size: 15px;
+}
+
+.palette-subtitle {
+  font-size: 12px;
+  color: #8d9aa1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .palette-hint {

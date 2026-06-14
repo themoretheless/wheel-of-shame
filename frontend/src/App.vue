@@ -339,6 +339,20 @@ const paletteCommands = computed<Command[]>(() => [
       copyLink()
     },
   },
+  // One spotlight command per active participant: type a name into Cmd-K and
+  // the fuzzy scorer floats the match to the top, then Enter eliminates them.
+  ...activeParticipants.value.map((p): Command => {
+    const odds = Math.round(100 / activeParticipants.value.length)
+    return {
+      id: `remove-${p.id}`,
+      label: `Eliminate ${p.name}`,
+      subtitle: `${odds}% to be picked next`,
+      hint: 'Remove',
+      run: () => {
+        removeName(p.id)
+      },
+    }
+  }),
 ])
 
 // True when the keystroke targets a text field (name input, palette, etc.),
