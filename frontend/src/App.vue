@@ -10,6 +10,7 @@ const WheelCanvas = defineAsyncComponent({
 })
 import NameList from './components/NameList.vue'
 import SpinResultModal from './components/SpinResult.vue'
+import RecapReel from './components/RecapReel.vue'
 import CommandPalette, { type Command } from './components/CommandPalette.vue'
 import ShortcutsSheet from './components/ShortcutsSheet.vue'
 import ToastStack from './components/ToastStack.vue'
@@ -48,6 +49,12 @@ const wheelRef = ref<{
   toggleMute: () => void
 } | null>(null)
 const winnerData = ref<{ id: string; name: string; remaining: number } | null>(null)
+// Curtain-call recap: when the final spin leaves a lone survivor, the recap reel
+// is queued here and shown once the winner lower-third is dismissed, so the two
+// overlays never stack. The flag is armed in onSpinComplete and consumed (then
+// shown) in dismissWinner.
+const recapQueued = ref(false)
+const recapOpen = ref(false)
 // True while the orbit camera has been dragged off its resting framing; drives
 // the Snap-home reset pill below the header.
 const cameraDrifted = ref(false)
@@ -393,6 +400,15 @@ watch(remoteSpinResult, (result) => {
   spinning.value = true
 })
 
+// A reset (or switching sessions) clears the picked list; tear down any pending
+// or open recap so a fresh game never inherits a stale curtain call.
+watch(removedParticipants, (removed) => {
+  if (removed.length === 0) {
+    recapQueued.value = false
+    recapOpen.value = false
+  }
+})
+
 async function createSession() {
   const title = titleInput.value.trim()
   if (!title) return
@@ -441,6 +457,12 @@ function resetView() {
 function dismissWinner() {
   winnerData.value = null
   wheelRef.value?.dismissWinner()
+  // If that was the final elimination, roll the curtain-call recap now that the
+  // winner card is out of the way.
+  if (recapQueued.value) {
+    recapQueued.value = false
+    recapOpen.value = true
+  }
 }
 
 function onSpinComplete(_participantId: string) {
@@ -452,6 +474,11 @@ function onSpinComplete(_participantId: string) {
   winnerId.value = null
   isLocalSpin = false
   remoteSpinResult.value = null
+  // Game over: one name left on the wheel and at least one already picked. Arm
+  // the recap so it plays when the winner lower-third is dismissed.
+  if (activeParticipants.value.length <= 1 && removedParticipants.value.length > 0) {
+    recapQueued.value = true
+  }
 }
 
 function copyLink() {
@@ -585,8 +612,12 @@ function onGlobalKeydown(e: KeyboardEvent) {
     shortcutsOpen.value = true
   } else if (e.code === 'Space' && !isEditableTarget(e.target)) {
     e.preventDefault()
-    // Don't spin underneath the winner modal: Space is inert until dismissed.
-    if (!winnerData.value) handleSpin()
+    // Don't spin underneath the winner modal or the recap reel: Space is inert
+    // until whichever overlay is up has been dismissed.
+    if (!winnerData.value && !recapOpen.value) handleSpin()
+  } else if (e.key === 'Escape' && recapOpen.value) {
+    e.preventDefault()
+    recapOpen.value = false
   } else if (e.key === 'Escape' && winnerData.value) {
     e.preventDefault()
     dismissWinner()
@@ -797,6 +828,15 @@ function onGlobalKeydown(e: KeyboardEvent) {
       :remaining="winnerData.remaining"
       :color="identityColor(winnerData.name)"
       @close="dismissWinner"
+    />
+  </Teleport>
+
+  <Teleport to="body">
+    <RecapReel
+      v-if="recapOpen"
+      :picked="removedParticipants"
+      :survivor="activeParticipants[0] ?? null"
+      @close="recapOpen = false"
     />
   </Teleport>
 
