@@ -463,6 +463,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
     <!-- Session screen -->
     <div v-if="session" class="session-screen">
       <div class="session-header">
+        <h2 class="session-title" :title="session.title">{{ session.title }}</h2>
         <div class="session-actions">
           <span class="ws-status" :class="{ connected: wsConnected }">
             {{ wsConnected ? 'Live' : 'Offline' }}
@@ -815,19 +816,28 @@ function onGlobalKeydown(e: KeyboardEvent) {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 16px;
   margin-bottom: 24px;
 }
 
-.session-header h2 {
+.session-title {
   margin: 0;
+  min-width: 0;
+  flex: 1;
+  font-size: 20px;
+  font-weight: 600;
   color: #dfe6e9;
   text-shadow: 0 1px 10px rgba(0,0,0,0.5);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .session-actions {
   display: flex;
   gap: 8px;
   align-items: center;
+  flex-shrink: 0;
 }
 
 .main-layout {
