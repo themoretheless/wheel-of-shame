@@ -9,6 +9,19 @@ function initialOf(name: string): string {
   return (name.trim()[0] ?? '?').toUpperCase()
 }
 
+// The first three names off the wheel earn a medal tier (gold/silver/bronze);
+// in a wheel of shame, going out earliest is the standout fate. `order` is the
+// 1-based spin_order, so rank 1 is the very first elimination.
+const MEDAL_TIERS: Record<number, string> = {
+  1: 'gold',
+  2: 'silver',
+  3: 'bronze',
+}
+
+function medalTier(order: number | undefined): string | null {
+  return order != null ? (MEDAL_TIERS[order] ?? null) : null
+}
+
 const props = defineProps<{
   active: Participant[]
   removed: Participant[]
@@ -21,6 +34,13 @@ const props = defineProps<{
 // odds bar behind every active row, recomputing as names are added or ejected.
 const oddsPct = computed(() =>
   props.active.length > 0 ? 100 / props.active.length : 0,
+)
+
+// Last one standing: once at least one name has been picked and a single active
+// row remains, that row is crowned the survivor (a gold-trimmed counterpart to
+// the picked-list medals).
+const survivorReached = computed(
+  () => props.active.length === 1 && props.removed.length > 0,
 )
 
 const emit = defineEmits<{
@@ -170,6 +190,7 @@ function addName() {
             error: p.error,
             ticking: p.id === tickingId,
             dimmed: !matchesFilter(p),
+            survivor: survivorReached,
           }"
           :style="{
             '--odds-width': oddsPct + '%',
@@ -182,6 +203,9 @@ function addName() {
               initialOf(p.name)
             }}</span>
             <span class="name-text">{{ p.name }}</span>
+            <span v-if="survivorReached" class="survivor-chip" title="Last one standing">
+              Survivor
+            </span>
           </span>
           <button
             v-if="!p.pending"
@@ -207,12 +231,22 @@ function addName() {
     <div v-if="removed.length > 0" class="participants removed-list">
       <h3>Picked ({{ removed.length }})</h3>
       <ol>
-        <li v-for="p in removed" :key="p.id" class="participant-item picked">
+        <li
+          v-for="p in removed"
+          :key="p.id"
+          class="participant-item picked"
+          :class="medalTier(p.spin_order) ? 'medal-' + medalTier(p.spin_order) : null"
+        >
           <span class="name-cell">
+            <span
+              class="rank-chip"
+              :class="medalTier(p.spin_order) ? 'medal-' + medalTier(p.spin_order) : null"
+              >#{{ p.spin_order }}</span
+            >
             <span class="identity-token" :style="{ background: identityColor(p.name) }">{{
               initialOf(p.name)
             }}</span>
-            <span class="name-text">#{{ p.spin_order }} — {{ p.name }}</span>
+            <span class="name-text">{{ p.name }}</span>
           </span>
         </li>
       </ol>
@@ -487,6 +521,83 @@ ol {
 .participant-item.picked {
   opacity: 0.6;
   text-decoration: line-through;
+}
+
+/* Medal tiers: the first three names off the wheel keep a little more presence
+   than the rest of the picked list, lifted by a left accent in their tier color
+   so the earliest exits read as a podium. --medal is set per tier below. */
+.participant-item.picked.medal-gold,
+.participant-item.picked.medal-silver,
+.participant-item.picked.medal-bronze {
+  opacity: 0.85;
+  box-shadow: inset 3px 0 0 var(--medal);
+}
+
+.participant-item.medal-gold {
+  --medal: #ffd54a;
+}
+
+.participant-item.medal-silver {
+  --medal: #cfd8dc;
+}
+
+.participant-item.medal-bronze {
+  --medal: #d99c66;
+}
+
+/* Rank chip: the 1-based elimination order, leading each picked row. Plain rows
+   carry a muted chip; medal rows tint theirs to the tier color and skip the
+   strike-through so the number stays legible. */
+.rank-chip {
+  flex: none;
+  min-width: 26px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: bold;
+  text-align: center;
+  text-decoration: none;
+  color: #b2bec3;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.rank-chip.medal-gold,
+.rank-chip.medal-silver,
+.rank-chip.medal-bronze {
+  color: #1e1e1e;
+  background: var(--medal);
+}
+
+.rank-chip.medal-gold {
+  --medal: #ffd54a;
+}
+
+.rank-chip.medal-silver {
+  --medal: #cfd8dc;
+}
+
+.rank-chip.medal-bronze {
+  --medal: #d99c66;
+}
+
+/* Survivor: the lone active row once everyone else has been picked. A gold trim
+   and a small chip crown the last one standing, mirroring the picked-list gold
+   medal. */
+.participant-item.survivor {
+  box-shadow: inset 0 0 0 1px rgba(255, 213, 74, 0.6);
+  background: color-mix(in srgb, #ffd54a 12%, rgba(255, 255, 255, 0.05));
+}
+
+.survivor-chip {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: bold;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #1e1e1e;
+  background: #ffd54a;
 }
 
 /* Filtered out: the row stays in the DOM (so odds bars stay correct) but recedes
