@@ -59,6 +59,11 @@ let pointerMesh: THREE.Mesh | null = null
 let pegPivot: THREE.Group | null = null // hinge that lets the pointer flap
 let pegMeshes: THREE.Mesh[] = []
 let donutMeshes: THREE.Mesh[] = [] // per-segment odds-donut arcs around the hub
+// Pre-roll countdown ring: a single thin arc tucked just inside the inner rim
+// that sweeps from 0 to 2π during the wind-up pre-roll. Built lazily on first
+// spin, parked invisible between spins, and disposed on unmount.
+let countdownRing: THREE.Mesh | null = null
+let countdownRingMat: THREE.MeshBasicMaterial | null = null
 let pegSpacing = 0 // angular gap between pegs during the active spin
 let prevPegSign = 0 // sign of the nearest-peg offset, to detect crossings
 // Squash-and-stretch on the pointer tip. squash is a signed scalar (+contact
@@ -184,6 +189,13 @@ const WHEEL_DEPTH = 0.3
 const DONUT_INNER = WHEEL_INNER + 0.06
 const DONUT_OUTER = WHEEL_INNER + 0.22
 const DONUT_GAP = 0.04 // radians trimmed off each arc end so segments separate
+
+// Pre-roll countdown ring: a thin arc tucked just inside the inner rim that
+// sweeps closed over COUNTDOWN_MS before the wind-up launches (Apple-keynote
+// "get ready" beat). Skipped under reduced motion.
+const COUNTDOWN_INNER = WHEEL_INNER - 0.1
+const COUNTDOWN_OUTER = WHEEL_INNER - 0.04
+const COUNTDOWN_MS = 700
 
 
 const textGeoCache = new Map<string, THREE.BufferGeometry>()
@@ -667,6 +679,45 @@ function addOddsDonut(arcs: { start: number; end: number; color: string }[]) {
 function addWheelCenter() {
   if (!wheelGroup) return
   wheelGroup.add(getCenterGroup())
+}
+
+// Set the countdown ring's visible sweep to `frac` (0..1) of a full turn,
+// rebuilding its arc geometry each step. Lives in pivotGroup (not wheelGroup) so
+// the sweep angle is independent of the wheel's own rotation. Built lazily on
+// first use and parked invisible (frac <= 0).
+function setCountdownArc(frac: number) {
+  if (!pivotGroup) return
+  if (!countdownRing) {
+    countdownRingMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.85,
+    })
+    countdownRing = new THREE.Mesh(new THREE.BufferGeometry(), countdownRingMat)
+    // Sit just proud of the wheel face, in front of the hub.
+    countdownRing.position.z = WHEEL_DEPTH / 2 + 0.02
+    countdownRing.visible = false
+    pivotGroup.add(countdownRing)
+  }
+  const f = Math.max(0, Math.min(1, frac))
+  if (f <= 0) {
+    countdownRing.visible = false
+    return
+  }
+  // Sweep clockwise from the top (12 o'clock) so it reads as a winding-up dial.
+  const start = Math.PI / 2
+  const span = f * Math.PI * 2
+  countdownRing.geometry.dispose()
+  countdownRing.geometry = new THREE.RingGeometry(
+    COUNTDOWN_INNER,
+    COUNTDOWN_OUTER,
+    48,
+    1,
+    start - span,
+    span,
+  )
+  countdownRing.visible = true
+  markDirty()
 }
 
 function buildWheel() {
@@ -1500,6 +1551,36 @@ function playThunk() {
   }
 }
 
+// Rising sine that plays once across the pre-roll countdown sweep: a single
+// oscillator glides up about an octave while a soft swell fades in, building
+// anticipation before the wheel launches. Duration matches COUNTDOWN_MS.
+function playCountdown() {
+  if (isMuted.value) return
+  try {
+    if (!audioCtx) {
+      const Ctor = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
+      audioCtx = new Ctor()
+    }
+    const ctx = audioCtx
+    if (ctx.state === 'suspended') ctx.resume()
+    const now = ctx.currentTime
+    const dur = COUNTDOWN_MS / 1000
+    const osc = ctx.createOscillator()
+    const gain = ctx.createGain()
+    osc.type = 'sine'
+    osc.frequency.setValueAtTime(330, now)
+    osc.frequency.exponentialRampToValueAtTime(660, now + dur)
+    gain.gain.setValueAtTime(0.0001, now)
+    gain.gain.exponentialRampToValueAtTime(0.12, now + dur * 0.85)
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + dur)
+    osc.connect(gain).connect(ctx.destination)
+    osc.start(now)
+    osc.stop(now + dur + 0.02)
+  } catch {
+    // Audio unavailable — silently skip.
+  }
+}
+
 // Swing the pointer off the nearest peg and tick when a peg crosses the tip.
 // `intensity` (0..1) grows toward the finale, scaling the kick and volume.
 function updateFlapper(intensity: number) {
@@ -1645,7 +1726,9 @@ function animateSpin() {
   // the main phase travels (totalRotation - windUpAngle) from the wound point.
   const windUpDuration = reducedMotion ? 0 : 250
   const windUpAngle = reducedMotion ? 0 : -spinDirection * 0.12
-  const startTime = performance.now()
+  // Set when the spin proper begins; deferred past the pre-roll countdown so the
+  // wind-up/main phases measure elapsed time from the launch, not the pre-roll.
+  let startTime = performance.now()
   const startRot = currentRotation
   const mainStartRot = startRot + windUpAngle
 
@@ -1795,7 +1878,36 @@ function animateSpin() {
     }
   }
 
-  requestAnimationFrame(frame)
+  // Launch the spin proper: rebase startTime to now so the wind-up/main phases
+  // measure from here, and kick off the frame loop.
+  function launch() {
+    startTime = performance.now()
+    requestAnimationFrame(frame)
+  }
+
+  // Pre-roll countdown: a ~700ms ring sweep around the hub with a rising tone,
+  // building a "get ready" beat before the wheel launches. Skipped under reduced
+  // motion, where the spin starts immediately.
+  if (reducedMotion) {
+    launch()
+    return
+  }
+
+  playCountdown()
+  const preRollStart = performance.now()
+  function preRoll(now: number) {
+    markDirty()
+    const p = Math.min((now - preRollStart) / COUNTDOWN_MS, 1)
+    // Ease-out so the ring slows as it closes, handing off to the wind-up.
+    setCountdownArc(1 - Math.pow(1 - p, 2))
+    if (p < 1) {
+      requestAnimationFrame(preRoll)
+    } else {
+      setCountdownArc(0)
+      launch()
+    }
+  }
+  requestAnimationFrame(preRoll)
 }
 
 watch(
@@ -1987,6 +2099,8 @@ onBeforeUnmount(() => {
   if (sharedDividerGeo) sharedDividerGeo.dispose()
   if (sharedPegGeo) sharedPegGeo.dispose()
   if (sharedPegMat) sharedPegMat.dispose()
+  if (countdownRing) countdownRing.geometry.dispose()
+  if (countdownRingMat) countdownRingMat.dispose()
   if (audioCtx) audioCtx.close().catch(() => {})
   if (controls) controls.dispose()
   if (scene && scene.environment) {
