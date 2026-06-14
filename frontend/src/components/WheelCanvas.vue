@@ -1317,8 +1317,14 @@ function animateSpin() {
   const fullSpins = Math.PI * 2 * (5 + Math.floor(Math.random() * 3)) * spinDirection
   const totalRotation = fullSpins + delta
   const duration = 4000
+  // Anticipation wind-up: a brief reverse rotation that loads the spin before
+  // it launches forward. The wheel still lands at startRot + totalRotation, so
+  // the main phase travels (totalRotation - windUpAngle) from the wound point.
+  const windUpDuration = 250
+  const windUpAngle = -spinDirection * 0.12
   const startTime = performance.now()
   const startRot = currentRotation
+  const mainStartRot = startRot + windUpAngle
 
   isSpinAnimating = true
   setHoveredBtn(null)
@@ -1334,21 +1340,39 @@ function animateSpin() {
   function frame(now: number) {
     markDirty()
     const elapsed = now - startTime
-    const t = Math.min(elapsed / duration, 1)
+
+    if (elapsed < windUpDuration) {
+      // Ease-in reverse load; hold the camera at its drop framing so the
+      // camera return reads as starting only once the wheel snaps forward.
+      const wt = elapsed / windUpDuration
+      const wEase = wt * wt
+      currentRotation = startRot + windUpAngle * wEase
+      if (wheelGroup) wheelGroup.rotation.z = currentRotation
+      updateFlapper(0)
+      if (camera) {
+        camera.position.copy(camFrom)
+        camera.lookAt(controls?.target ?? new THREE.Vector3(0, 0, 0))
+      }
+      requestAnimationFrame(frame)
+      return
+    }
+
+    const spinElapsed = elapsed - windUpDuration
+    const t = Math.min(spinElapsed / duration, 1)
     const eased = 1 - Math.pow(1 - t, 3)
 
-    currentRotation = startRot + totalRotation * eased
+    currentRotation = mainStartRot + (totalRotation - windUpAngle) * eased
     if (wheelGroup) {
       wheelGroup.rotation.z = currentRotation
     }
     updateFlapper(t)
 
-    if (camera && elapsed < camReturnDuration) {
-      const ct = Math.min(elapsed / camReturnDuration, 1)
+    if (camera && spinElapsed < camReturnDuration) {
+      const ct = Math.min(spinElapsed / camReturnDuration, 1)
       const ce = 1 - Math.pow(1 - ct, 2)
       camera.position.lerpVectors(camFrom, camHome, ce)
       camera.lookAt(controls?.target ?? new THREE.Vector3(0, 0, 0))
-    } else if (camera && elapsed >= camReturnDuration && elapsed < camReturnDuration + 16) {
+    } else if (camera && spinElapsed >= camReturnDuration && spinElapsed < camReturnDuration + 16) {
       camera.position.copy(camHome)
       camera.lookAt(controls?.target ?? new THREE.Vector3(0, 0, 0))
     }
