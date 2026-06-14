@@ -557,6 +557,31 @@ function onGlobalKeydown(e: KeyboardEvent) {
   pointer-events: none;
 }
 
+/* Frosted scrim: a fixed darkening layer that sits above the 3D wheel
+   (z-index 0) but behind the overlay content. As a z-index:-1 child of the
+   overlay's own stacking context it paints behind the panels yet above the
+   canvas, deepening contrast under the right-side roster and bottom dock the
+   way a keynote vignette pushes the subject forward. pointer-events:none lets
+   wheel drags pass straight through. */
+.overlay::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      ellipse at right,
+      rgba(0, 0, 0, 0.45),
+      transparent 60%
+    ),
+    linear-gradient(
+      to top,
+      rgba(0, 0, 0, 0.4),
+      transparent 28%
+    );
+}
+
 /* All interactive elements get pointer-events back */
 .overlay .fire-header,
 .overlay .loading,
