@@ -8,6 +8,22 @@ export interface UseWebSocket {
   onUnexpectedClose: (handler: () => void) => void
 }
 
+/**
+ * Build the WebSocket URL for a session. Pure (no globals) so it can be
+ * unit-tested: the page protocol/host and the optional API base override are
+ * passed in. `https:` upgrades to `wss:`, anything else stays plaintext `ws:`.
+ */
+export function buildWsUrl(
+  sessionId: string,
+  pageProtocol: string,
+  pageHost: string,
+  apiBaseUrl?: string,
+): string {
+  const proto = pageProtocol === 'https:' ? 'wss:' : 'ws:'
+  const host = apiBaseUrl ? new URL(apiBaseUrl).host : pageHost
+  return `${proto}//${host}/api/v1/sessions/${sessionId}/ws`
+}
+
 export function useWebSocket(): UseWebSocket {
   const connected = ref(false)
   let ws: WebSocket | null = null
@@ -15,11 +31,12 @@ export function useWebSocket(): UseWebSocket {
   let closeHandler: (() => void) | null = null
 
   function getWsUrl(sessionId: string): string {
-    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const host = import.meta.env.VITE_API_BASE_URL
-      ? new URL(import.meta.env.VITE_API_BASE_URL).host
-      : window.location.host
-    return `${proto}//${host}/api/v1/sessions/${sessionId}/ws`
+    return buildWsUrl(
+      sessionId,
+      window.location.protocol,
+      window.location.host,
+      import.meta.env.VITE_API_BASE_URL,
+    )
   }
 
   function connect(sessionId: string) {
