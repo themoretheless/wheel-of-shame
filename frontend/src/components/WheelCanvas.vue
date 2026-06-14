@@ -128,6 +128,9 @@ let flickCooldown = 0
 const BASE_CAM_Z = 7.8
 let homeCamZ = BASE_CAM_Z
 const FLICK_THRESHOLD = 0.06 // radians per frame — trigger spin
+// Fraction of the main spin after which animateSpin re-maps the easing through
+// a second, slower deceleration so the wheel creeps into the landing peg.
+const SLOWMO_START = 0.82
 // Snap-home: once the orbit camera drifts off its resting framing we surface a
 // reset pill. Tracked with hysteresis so a single threshold-straddling frame
 // doesn't flicker the pill on and off.
@@ -1557,7 +1560,22 @@ function animateSpin() {
 
     const spinElapsed = elapsed - windUpDuration
     const t = Math.min(spinElapsed / duration, 1)
-    const eased = 1 - Math.pow(1 - t, 3)
+
+    // Final-phase slow-mo: up to SLOWMO_START the cubic ease-out runs as usual;
+    // past it the tail is re-mapped through a stretched-sine deceleration so the
+    // wheel visibly creeps into the landing peg (Magic Move easing). The branch
+    // is continuous in value at the join and still lands exactly at 1, so the
+    // wheel stops on the same target. Skipped under reduced motion, where the
+    // whole spin is already collapsed to a short single rotation.
+    let eased: number
+    let slowmoU = 0 // 0..1 progress through the slow-mo window, 0 outside it
+    if (reducedMotion || t < SLOWMO_START) {
+      eased = 1 - Math.pow(1 - t, 3)
+    } else {
+      const e0 = 1 - Math.pow(1 - SLOWMO_START, 3)
+      slowmoU = (t - SLOWMO_START) / (1 - SLOWMO_START)
+      eased = e0 + (1 - e0) * Math.sin(slowmoU * (Math.PI / 2))
+    }
 
     currentRotation = mainStartRot + (totalRotation - windUpAngle) * eased
     if (wheelGroup) {
@@ -1569,6 +1587,13 @@ function animateSpin() {
       const ct = Math.min(spinElapsed / camReturnDuration, 1)
       const ce = 1 - Math.pow(1 - ct, 2)
       camera.position.lerpVectors(camFrom, camHome, ce)
+      camera.lookAt(controls?.target ?? new THREE.Vector3(0, 0, 0))
+    } else if (camera && slowmoU > 0) {
+      // Subtle push-in during the slow-mo crawl: ease the camera toward
+      // camHome*0.94 and back to home across the window (sine bump peaks at the
+      // midpoint, returns to exactly camHome at t=1 so post-spin framing holds).
+      const push = Math.sin(slowmoU * Math.PI)
+      camera.position.set(camHome.x, camHome.y, camHome.z * (1 - 0.06 * push))
       camera.lookAt(controls?.target ?? new THREE.Vector3(0, 0, 0))
     } else if (camera && spinElapsed >= camReturnDuration && spinElapsed < camReturnDuration + 16) {
       camera.position.copy(camHome)
