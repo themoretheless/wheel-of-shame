@@ -1510,6 +1510,20 @@ function resetView() {
 
 defineExpose({ dismissWinner, resetView, isMuted, toggleMute })
 
+// Tactile companion to the peg tick / landing thunk: a short haptic buzz on
+// devices that support the Vibration API. Gated behind the same isMuted flag and
+// reduced-motion check as the audio voices, so the mute button and the OS motion
+// preference silence it together. No-op where navigator.vibrate is unavailable
+// (most desktops), so it only ever adds feel on capable handhelds.
+function buzz(pattern: number | number[]) {
+  if (isMuted.value || prefersReducedMotion()) return
+  try {
+    navigator.vibrate?.(pattern)
+  } catch {
+    // Vibration unavailable, silently skip.
+  }
+}
+
 // Short percussive click synthesised on each peg strike. Created lazily on the
 // first tick — the spin is click-initiated, so the audio context is allowed to
 // start. Volume rises toward the finale for tension.
@@ -1737,6 +1751,9 @@ function updateFlapper(intensity: number) {
   const sign = m >= 0 ? 1 : -1
   if (prevPegSign !== 0 && sign !== prevPegSign && Math.abs(m) < pegSpacing * 0.3) {
     playTick(0.04 + 0.16 * intensity)
+    // A faint per-peg tap that firms up toward the finale (intensity rises as the
+    // wheel slows), so a handheld feels the ticks alongside the click.
+    buzz(Math.round(4 + 8 * intensity))
   }
   prevPegSign = sign
 
@@ -1984,6 +2001,9 @@ function animateSpin() {
       // the rock-over begins.
       stopWhoosh()
       playThunk()
+      // A heavier double-tap landing buzz to match the thunk, sealing the spin
+      // with a tactile beat on capable devices.
+      buzz([0, 30, 20, 40])
 
       if (reducedMotion) {
         // Snap to the final angle and reveal, no rock-over-the-last-peg.
