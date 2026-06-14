@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import type { Participant } from '../types'
 import { identityColor } from '../utils/identity'
 
@@ -8,10 +8,16 @@ function initialOf(name: string): string {
   return (name.trim()[0] ?? '?').toUpperCase()
 }
 
-defineProps<{
+const props = defineProps<{
   active: Participant[]
   removed: Participant[]
 }>()
+
+// Each active name has equal odds of being picked next; this drives the tinted
+// odds bar behind every active row, recomputing as names are added or ejected.
+const oddsPct = computed(() =>
+  props.active.length > 0 ? 100 / props.active.length : 0,
+)
 
 const emit = defineEmits<{
   (e: 'add', name: string): void
@@ -64,6 +70,10 @@ function addName() {
           :key="p.id"
           class="participant-item"
           :class="{ pending: p.pending, error: p.error }"
+          :style="{
+            '--odds-width': oddsPct + '%',
+            '--odds-color': identityColor(p.name),
+          }"
         >
           <span class="name-cell">
             <span class="identity-token" :style="{ background: identityColor(p.name) }">{{
@@ -147,6 +157,7 @@ function addName() {
 }
 
 .btn-remove {
+  position: relative;
   background: transparent;
   color: #e74c3c;
   font-size: 18px;
@@ -182,6 +193,7 @@ ol {
 }
 
 .participant-item {
+  position: relative;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -189,9 +201,34 @@ ol {
   border-radius: 6px;
   margin-bottom: 4px;
   background: rgba(255, 255, 255, 0.05);
+  overflow: hidden;
+}
+
+/* Live odds bar: a tinted fill behind the row, its width the participant's
+   chance of being picked next (equal split across active names). The width
+   transitions as the roster changes, so adding a name visibly shortens every
+   bar. Sits behind the content; --odds-width/--odds-color are set per row. */
+.participant-item::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--odds-width, 0%);
+  background: var(--odds-color, transparent);
+  opacity: 0.16;
+  border-radius: inherit;
+  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  pointer-events: none;
+}
+
+/* Removed/optimistic rows don't carry odds, so hide their bar. */
+.participant-item.picked::before,
+.participant-item.pending::before,
+.participant-item.error::before {
+  display: none;
 }
 
 .name-cell {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
