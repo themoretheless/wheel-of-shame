@@ -341,10 +341,32 @@ const paletteCommands = computed<Command[]>(() => [
   },
 ])
 
+// True when the keystroke targets a text field (name input, palette, etc.),
+// so global shortcuts don't hijack normal typing: a space in a name should
+// insert a space, not spin the wheel.
+function isEditableTarget(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null
+  if (!el) return false
+  const tag = el.tagName
+  return tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable
+}
+
 function onGlobalKeydown(e: KeyboardEvent) {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
     e.preventDefault()
     paletteOpen.value = !paletteOpen.value
+    return
+  }
+  // The command palette owns the keyboard while it's open (Escape closes it).
+  if (paletteOpen.value) return
+
+  if (e.code === 'Space' && !isEditableTarget(e.target)) {
+    e.preventDefault()
+    // Don't spin underneath the winner modal: Space is inert until dismissed.
+    if (!winnerData.value) handleSpin()
+  } else if (e.key === 'Escape' && winnerData.value) {
+    e.preventDefault()
+    dismissWinner()
   }
 }
 </script>
@@ -394,6 +416,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
           <span class="ws-status" :class="{ connected: wsConnected }">
             {{ wsConnected ? 'Live' : 'Offline' }}
           </span>
+          <span class="kbd-hint" title="Press Space to spin"><kbd>Space</kbd> to spin</span>
           <button @click="copyLink" class="btn btn-small" title="Copy link">Share</button>
         </div>
       </div>
@@ -602,6 +625,20 @@ function onGlobalKeydown(e: KeyboardEvent) {
 .ws-status.connected {
   background: rgba(78, 205, 196, 0.2);
   color: #4ECDC4;
+}
+
+.kbd-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: rgba(223, 230, 233, 0.6);
+}
+
+@media (max-width: 700px) {
+  .kbd-hint {
+    display: none;
+  }
 }
 
 .session-header {

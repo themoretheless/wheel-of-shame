@@ -16,3 +16,18 @@ body {
   width: 100%;
   min-height: 100vh;
 }
+
+/* Keycap-style hint chip (e.g. the "Space to spin" shortcut). */
+kbd {
+  display: inline-block;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 6px;
+  color: #dfe6e9;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.12) inset, 0 1px 2px rgba(0, 0, 0, 0.4);
+}
