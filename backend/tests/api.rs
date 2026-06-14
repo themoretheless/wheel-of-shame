@@ -70,6 +70,76 @@ async fn create_session_rejects_empty_title() {
 }
 
 #[tokio::test]
+async fn create_session_rejects_overlong_title() {
+    let app = app();
+    let title = "x".repeat(201);
+    let (status, body) =
+        send(&app, "POST", "/api/v1/sessions", Some(json!({ "title": title }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].is_string());
+
+    // The boundary length must still be accepted.
+    let title = "y".repeat(200);
+    let (status, _) =
+        send(&app, "POST", "/api/v1/sessions", Some(json!({ "title": title }))).await;
+    assert_eq!(status, StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn add_participant_rejects_overlong_name() {
+    let app = app();
+    let id = create_session(&app, "Demo").await;
+    let name = "z".repeat(101);
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("/api/v1/sessions/{id}/participants"),
+        Some(json!({ "name": name })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].is_string());
+
+    assert!(get_participants(&app, &id).await.is_empty());
+}
+
+#[tokio::test]
+async fn batch_rejects_too_many_names() {
+    let app = app();
+    let id = create_session(&app, "Demo").await;
+    let names: Vec<String> = (0..501).map(|i| format!("p{i}")).collect();
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("/api/v1/sessions/{id}/participants/batch"),
+        Some(json!({ "names": names })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].is_string());
+
+    assert!(get_participants(&app, &id).await.is_empty());
+}
+
+#[tokio::test]
+async fn batch_rejects_overlong_name() {
+    let app = app();
+    let id = create_session(&app, "Demo").await;
+    let long = "q".repeat(101);
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("/api/v1/sessions/{id}/participants/batch"),
+        Some(json!({ "names": ["Alice", long] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].is_string());
+
+    assert!(get_participants(&app, &id).await.is_empty());
+}
+
+#[tokio::test]
 async fn add_single_participant() {
     let app = app();
     let id = create_session(&app, "Demo").await;
