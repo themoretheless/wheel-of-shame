@@ -119,6 +119,11 @@ const ambientBaseIntensity = 0.7
 const keyBaseIntensity = 1.0
 let otFont: opentype.Font | null = null
 let animFrameId = 0
+// Odds-heat halo: a short emissive pulse run across the donut rings whenever the
+// roster changes, so the odds redistribution registers as a soft bloom around
+// the hub (the rings already sit in the bloom pass's path). Its own rAF id so a
+// rapid sequence of edits restarts the pulse cleanly instead of stacking loops.
+let haloFrameId = 0
 
 // Cached reusable objects
 const cachedMaterials = new Map<string, THREE.Material>()
@@ -706,13 +711,57 @@ function addOddsDonut(arcs: { start: number; end: number; color: string }[]) {
     const span = arc.end - arc.start - gap
     if (span <= 0.001) continue
     const geo = new THREE.RingGeometry(DONUT_INNER, DONUT_OUTER, 32, 1, arc.start + gap / 2, span)
-    const mat = new THREE.MeshStandardMaterial({ color: arc.color, metalness: 0.2, roughness: 0.45 })
+    // Emissive seeded to the arc's own hue but parked at intensity 0, so at rest
+    // the ring looks exactly as before; pulseOddsHalo ramps the intensity on a
+    // roster change to flash a bloom-fed glow, then decays it back to 0.
+    const mat = new THREE.MeshStandardMaterial({
+      color: arc.color,
+      emissive: new THREE.Color(arc.color),
+      emissiveIntensity: 0,
+      metalness: 0.2,
+      roughness: 0.45,
+    })
     const ring = new THREE.Mesh(geo, mat)
     // Lift just proud of the wheel face so the donut catches the key light.
     ring.position.z = WHEEL_DEPTH / 2 + 0.012
     wheelGroup.add(ring)
     donutMeshes.push(ring)
   }
+}
+
+// Flash the odds-donut rings with a brief emissive pulse so a roster edit reads
+// as the odds heating up around the hub. The rings sit in the bloom pass's path,
+// so the bumped emissive blooms; the intensity ramps in fast then decays back to
+// 0, each frame marking the scene dirty (the loop is otherwise idle between
+// edits). Skipped under reduced motion and while a spin owns the wheel. Any in-
+// flight pulse is cancelled first so rapid edits restart cleanly.
+const HALO_PEAK = 0.9 // emissiveIntensity at the pulse crest
+const HALO_DURATION = 620 // ms from crest-ramp through full decay
+function pulseOddsHalo() {
+  cancelAnimationFrame(haloFrameId)
+  if (prefersReducedMotion() || isSpinAnimating || props.spinning) return
+  if (donutMeshes.length === 0) return
+  const start = performance.now()
+  function frame() {
+    const t = Math.min((performance.now() - start) / HALO_DURATION, 1)
+    // Quick attack to the crest (first 18%), then a smooth ease-out decay; lands
+    // at exactly 0 so the rings settle back to their resting (unlit) look.
+    const env = t < 0.18 ? t / 0.18 : Math.pow(1 - (t - 0.18) / 0.82, 2)
+    const intensity = HALO_PEAK * env
+    for (const ring of donutMeshes) {
+      ;(ring.material as THREE.MeshStandardMaterial).emissiveIntensity = intensity
+    }
+    markDirty()
+    if (t < 1 && !isSpinAnimating && !props.spinning) {
+      haloFrameId = requestAnimationFrame(frame)
+    } else {
+      for (const ring of donutMeshes) {
+        ;(ring.material as THREE.MeshStandardMaterial).emissiveIntensity = 0
+      }
+      markDirty()
+    }
+  }
+  haloFrameId = requestAnimationFrame(frame)
 }
 
 function addWheelCenter() {
@@ -2337,7 +2386,12 @@ watch(
 watch(
   () => props.participants.filter((p) => !p.removed).map((p) => p.id + ':' + p.name).join('|'),
   () => {
-    nextTick(() => buildWheel())
+    nextTick(() => {
+      buildWheel()
+      // Heat the freshly-rebuilt rings so the odds redistribution registers as a
+      // pulse; no-ops while a spin owns the wheel or under reduced motion.
+      pulseOddsHalo()
+    })
   },
 )
 
@@ -2347,6 +2401,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   cancelAnimationFrame(animFrameId)
+  cancelAnimationFrame(haloFrameId)
   window.removeEventListener('resize', handleResize)
   textGeoCache.forEach((g) => g.dispose())
   textGeoCache.clear()
