@@ -201,6 +201,18 @@ let isResettingView = false
 const CAM_DRIFT_ON = 0.6 // distance from home that raises the pill
 const CAM_DRIFT_OFF = 0.15 // distance below which it is considered home again
 
+// Magnetic snap: while the camera is idle and only slightly off its head-on
+// framing (azimuth 0, polar π/2) it is gently pulled back to that orientation,
+// like a Figma viewport detent. Engages only inside SNAP_CAPTURE on both axes
+// so deliberate orbits beyond it are left alone (and surface the reset pill
+// instead). A dead zone keeps it from fighting micro-offsets and lets the
+// render-on-demand loop settle.
+const SNAP_TARGET_AZIMUTH = 0
+const SNAP_TARGET_POLAR = Math.PI / 2
+const SNAP_CAPTURE = 0.28 // radians; orbit further than this is intentional
+const SNAP_DEADZONE = 0.004 // radians; below this we consider it settled
+const SNAP_PULL = 1.1 // per-frame fraction of the gap (pre-damping)
+
 const WHEEL_RADIUS = 2.2
 const WHEEL_INNER = 0.6
 const WHEEL_DEPTH = 0.3
@@ -1369,6 +1381,41 @@ function startRenderLoop() {
       } else if (cameraDrifted && dist < CAM_DRIFT_OFF) {
         cameraDrifted = false
         emit('camera-drifted', false)
+      }
+    }
+
+    // Magnetic snap-to-framing: nudge an idle, slightly-off camera back toward
+    // the head-on orientation. Off-limits while the pointer is down, the pill is
+    // up (deliberate orbit), an animation drives the camera, or reduced motion
+    // is requested. The pull only fires inside SNAP_CAPTURE on both axes so it
+    // complements the reset pill instead of fighting larger drifts.
+    if (
+      controls &&
+      controls.enabled &&
+      !isPointerDown &&
+      !isSpinAnimating &&
+      !props.spinning &&
+      !isResettingView &&
+      !cameraDrifted &&
+      !prefersReducedMotion()
+    ) {
+      const azGap = SNAP_TARGET_AZIMUTH - controls.getAzimuthalAngle()
+      const poGap = SNAP_TARGET_POLAR - controls.getPolarAngle()
+      const captured =
+        Math.abs(azGap) < SNAP_CAPTURE && Math.abs(poGap) < SNAP_CAPTURE
+      const settling =
+        Math.abs(azGap) > SNAP_DEADZONE || Math.abs(poGap) > SNAP_DEADZONE
+      if (captured && settling) {
+        // Strengthen the pull as the camera nears home (a soft detent), then
+        // hand off through rotateLeft/Up which apply the impulse via the
+        // controls' own damping on the next update().
+        const closeness =
+          1 - Math.max(Math.abs(azGap), Math.abs(poGap)) / SNAP_CAPTURE
+        const strength = SNAP_PULL * (0.5 + 0.5 * closeness)
+        controls.rotateLeft(-azGap * strength)
+        controls.rotateUp(-poGap * strength)
+        lastAzimuth = controls.getAzimuthalAngle()
+        markDirty()
       }
     }
 
