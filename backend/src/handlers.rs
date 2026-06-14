@@ -214,15 +214,15 @@ pub async fn session_ws(
 ) -> Result<impl IntoResponse, AppError> {
     ensure_session_exists(&state, &session_id).await?;
 
-    let rx = state.hub.subscribe(&session_id).await;
+    let sub = state.hub.subscribe(&session_id).await;
 
-    Ok(ws.on_upgrade(move |socket| handle_ws(socket, rx)))
+    Ok(ws.on_upgrade(move |socket| handle_ws(socket, sub)))
 }
 
-async fn handle_ws(mut socket: WebSocket, mut rx: tokio::sync::broadcast::Receiver<String>) {
+async fn handle_ws(mut socket: WebSocket, mut sub: crate::ws::Subscription) {
     loop {
         tokio::select! {
-            msg = rx.recv() => {
+            msg = sub.recv() => {
                 match msg {
                     Ok(text) => {
                         if socket.send(Message::Text(text.into())).await.is_err() {
