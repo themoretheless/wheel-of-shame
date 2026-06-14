@@ -333,9 +333,15 @@ const paletteCommands = computed<Command[]>(() => [
     label: 'Add a name',
     hint: 'New participant',
     disabled: !session.value,
-    run: () => {
-      const name = window.prompt('Name to add')?.trim()
-      if (name) addName(name)
+    // Opens an inline glass field in the palette rather than a native prompt;
+    // returning false keeps it open so several names can be added in a row.
+    run: () => {},
+    inline: {
+      placeholder: 'Name to add...',
+      submit: (name) => {
+        addName(name)
+        return false
+      },
     },
   },
   {

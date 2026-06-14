@@ -1,6 +1,15 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from 'vue'
 
+// An inline value-entry mode: when present, activating the command swaps the
+// command list for a single text field (Raycast-style) instead of running
+// immediately. submit() receives the typed value; returning false keeps the
+// field open for another entry, anything else closes the palette.
+export interface CommandInline {
+  placeholder: string
+  submit: (value: string) => void | boolean
+}
+
 export interface Command {
   id: string
   label: string
@@ -10,6 +19,8 @@ export interface Command {
   // Returning false keeps the palette open (e.g. an inline name entry that
   // wants another value); anything else closes it.
   run: () => void | boolean
+  // When set, the command opens an inline input instead of running on Enter.
+  inline?: CommandInline
   disabled?: boolean
 }
 
@@ -52,6 +63,12 @@ const query = ref('')
 const activeIndex = ref(0)
 const inputRef = ref<HTMLInputElement | null>(null)
 
+// The command currently in inline-entry mode, plus its field value. When set,
+// the list is replaced by a single text input bound to inlineValue.
+const inlineCommand = ref<Command | null>(null)
+const inlineValue = ref('')
+const inlineInputRef = ref<HTMLInputElement | null>(null)
+
 const filtered = computed(() => {
   const q = query.value.trim().toLowerCase()
   const list = props.commands.filter((c) => !c.disabled)
@@ -76,6 +93,8 @@ watch(
     if (open) {
       query.value = ''
       activeIndex.value = 0
+      inlineCommand.value = null
+      inlineValue.value = ''
       void nextTick(() => inputRef.value?.focus())
     }
   },
@@ -91,8 +110,48 @@ watch(filtered, (list) => {
 function runActive() {
   const cmd = filtered.value[activeIndex.value]
   if (!cmd) return
+  // Commands with an inline config swap the list for a single field instead of
+  // running straight away.
+  if (cmd.inline) {
+    inlineCommand.value = cmd
+    inlineValue.value = ''
+    void nextTick(() => inlineInputRef.value?.focus())
+    return
+  }
   const keepOpen = cmd.run()
   if (keepOpen !== false) emit('close')
+}
+
+function submitInline() {
+  const cmd = inlineCommand.value
+  if (!cmd?.inline) return
+  const value = inlineValue.value.trim()
+  if (!value) return
+  const keepOpen = cmd.inline.submit(value)
+  if (keepOpen === false) {
+    // Stay in inline mode for another entry (e.g. adding several names).
+    inlineValue.value = ''
+    void nextTick(() => inlineInputRef.value?.focus())
+    return
+  }
+  emit('close')
+}
+
+// Leave inline mode and return focus to the command list's search field.
+function cancelInline() {
+  inlineCommand.value = null
+  inlineValue.value = ''
+  void nextTick(() => inputRef.value?.focus())
+}
+
+function onInlineKeydown(e: KeyboardEvent) {
+  if (e.key === 'Enter') {
+    e.preventDefault()
+    submitInline()
+  } else if (e.key === 'Escape') {
+    e.preventDefault()
+    cancelInline()
+  }
 }
 
 function onKeydown(e: KeyboardEvent) {
@@ -121,33 +180,62 @@ function onKeydown(e: KeyboardEvent) {
   <Teleport to="body">
     <div v-if="open" class="palette-overlay" @click.self="emit('close')">
       <div class="palette" role="dialog" aria-modal="true">
-        <input
-          ref="inputRef"
-          v-model="query"
-          class="palette-input"
-          type="text"
-          placeholder="Type a command..."
-          @keydown="onKeydown"
-        />
-        <ul class="palette-list">
-          <li
-            v-for="(cmd, i) in filtered"
-            :key="cmd.id"
-            class="palette-item"
-            :class="{ active: i === activeIndex }"
-            @mouseenter="activeIndex = i"
-            @click="runActive"
-          >
-            <span class="palette-text">
-              <span class="palette-label">{{ cmd.label }}</span>
-              <span v-if="cmd.subtitle" class="palette-subtitle">{{ cmd.subtitle }}</span>
-            </span>
-            <span v-if="cmd.hint" class="palette-hint">{{ cmd.hint }}</span>
-          </li>
-          <li v-if="filtered.length === 0" class="palette-empty">
-            No matching commands
-          </li>
-        </ul>
+        <!-- Inline value-entry mode: a single field replaces the command list,
+             with the originating command's label as a breadcrumb. -->
+        <template v-if="inlineCommand">
+          <div class="palette-inline-bar">
+            <button class="palette-inline-back" @click="cancelInline" aria-label="Back to commands">
+              {{ inlineCommand.label }}
+            </button>
+            <input
+              ref="inlineInputRef"
+              v-model="inlineValue"
+              class="palette-input palette-inline-input"
+              type="text"
+              :placeholder="inlineCommand.inline?.placeholder"
+              @keydown="onInlineKeydown"
+            />
+          </div>
+          <ul class="palette-list">
+            <li class="palette-item active" @click="submitInline">
+              <span class="palette-text">
+                <span class="palette-label">
+                  {{ inlineValue.trim() ? `Confirm "${inlineValue.trim()}"` : 'Type a value...' }}
+                </span>
+              </span>
+              <span class="palette-hint">Enter</span>
+            </li>
+          </ul>
+        </template>
+        <template v-else>
+          <input
+            ref="inputRef"
+            v-model="query"
+            class="palette-input"
+            type="text"
+            placeholder="Type a command..."
+            @keydown="onKeydown"
+          />
+          <ul class="palette-list">
+            <li
+              v-for="(cmd, i) in filtered"
+              :key="cmd.id"
+              class="palette-item"
+              :class="{ active: i === activeIndex }"
+              @mouseenter="activeIndex = i"
+              @click="runActive"
+            >
+              <span class="palette-text">
+                <span class="palette-label">{{ cmd.label }}</span>
+                <span v-if="cmd.subtitle" class="palette-subtitle">{{ cmd.subtitle }}</span>
+              </span>
+              <span v-if="cmd.hint" class="palette-hint">{{ cmd.hint }}</span>
+            </li>
+            <li v-if="filtered.length === 0" class="palette-empty">
+              No matching commands
+            </li>
+          </ul>
+        </template>
       </div>
     </div>
   </Teleport>
@@ -204,6 +292,40 @@ function onKeydown(e: KeyboardEvent) {
 
 .palette-input::placeholder {
   color: #636e72;
+}
+
+/* Inline-entry header: a breadcrumb chip for the originating command sits to the
+   left of the value field, sharing the input's bottom border. */
+.palette-inline-bar {
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.palette-inline-back {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  margin: 10px 0 10px 12px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 8px;
+  background: rgba(78, 205, 196, 0.18);
+  color: #4ECDC4;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.palette-inline-back:hover {
+  background: rgba(78, 205, 196, 0.28);
+}
+
+.palette-inline-input {
+  border-bottom: none;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .palette-list {
