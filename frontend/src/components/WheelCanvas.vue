@@ -33,6 +33,7 @@ let wheelGroup: THREE.Group | null = null
 let pointerMesh: THREE.Mesh | null = null
 let pegPivot: THREE.Group | null = null // hinge that lets the pointer flap
 let pegMeshes: THREE.Mesh[] = []
+let donutMeshes: THREE.Mesh[] = [] // per-segment odds-donut arcs around the hub
 let pegSpacing = 0 // angular gap between pegs during the active spin
 let prevPegSign = 0 // sign of the nearest-peg offset, to detect crossings
 let audioCtx: AudioContext | null = null
@@ -130,6 +131,14 @@ const FLICK_THRESHOLD = 0.06 // radians per frame — trigger spin
 const WHEEL_RADIUS = 2.2
 const WHEEL_INNER = 0.6
 const WHEEL_DEPTH = 0.3
+
+// Odds donut: a thin per-segment ring hugging the hub, each arc tinted to the
+// participant's identity color so the colors read as a compact legend around
+// the center (Stripe-style). Sits just outside the inner rim and just proud of
+// the wheel face so it catches the light.
+const DONUT_INNER = WHEEL_INNER + 0.06
+const DONUT_OUTER = WHEEL_INNER + 0.22
+const DONUT_GAP = 0.04 // radians trimmed off each arc end so segments separate
 
 
 const textGeoCache = new Map<string, THREE.BufferGeometry>()
@@ -477,6 +486,7 @@ function buildWheelWithAngles(
   segmentMeshes = []
   dividerLines = []
   pegMeshes = []
+  donutMeshes = []
   // Old segment meshes are gone; drop any dangling hover reference so the
   // ease loop doesn't touch a disposed mesh.
   hoveredSeg = null
@@ -496,6 +506,9 @@ function buildWheelWithAngles(
 
   const sliceAngle = (Math.PI * 2) / active.length
   let cursor = 0
+  // Per-segment arcs for the odds donut, collected as the segments are laid
+  // out so the ring reuses the exact same start angles and colors.
+  const donutArcs: { start: number; end: number; color: string }[] = []
 
   // Uniform text sizing based on sliceAngle (not per-segment angles[i]) so
   // size stays stable during shrink animation. Shrink down first, then
@@ -535,6 +548,7 @@ function buildWheelWithAngles(
     const startAngle = cursor
     cursor += segAngle
     const color = identityColor(p.name)
+    donutArcs.push({ start: startAngle, end: startAngle + segAngle, color })
 
     const mesh = new THREE.Mesh(getSegmentGeometry(segAngle), getCachedMat(color, 0.1, 0.55))
     mesh.position.z = -WHEEL_DEPTH / 2
@@ -578,8 +592,31 @@ function buildWheelWithAngles(
     }
   })
 
+  addOddsDonut(donutArcs)
   addWheelCenter()
   markDirty()
+}
+
+// Build the odds donut: one short ring arc per segment, tinted to that
+// segment's identity color. Geometry and materials are created fresh per build
+// (not from the shared caches), so clearGroup/disposeChild reclaim them on the
+// next rebuild without touching the cached segment/text resources.
+function addOddsDonut(arcs: { start: number; end: number; color: string }[]) {
+  if (!wheelGroup || arcs.length === 0) return
+  // A single arc spanning the whole ring would have no visible seam; keep the
+  // gap only when there is more than one participant.
+  const gap = arcs.length > 1 ? DONUT_GAP : 0
+  for (const arc of arcs) {
+    const span = arc.end - arc.start - gap
+    if (span <= 0.001) continue
+    const geo = new THREE.RingGeometry(DONUT_INNER, DONUT_OUTER, 32, 1, arc.start + gap / 2, span)
+    const mat = new THREE.MeshStandardMaterial({ color: arc.color, metalness: 0.2, roughness: 0.45 })
+    const ring = new THREE.Mesh(geo, mat)
+    // Lift just proud of the wheel face so the donut catches the key light.
+    ring.position.z = WHEEL_DEPTH / 2 + 0.012
+    wheelGroup.add(ring)
+    donutMeshes.push(ring)
+  }
 }
 
 function addWheelCenter() {
@@ -608,9 +645,10 @@ function animateSegmentShrink(winnerId: string, callback: () => void) {
   const duration = 800
   const startTime = performance.now()
 
-  // Pegs sit at the original boundaries; hide them while the segments slide to
-  // new angles in place (buildWheel re-creates them afterward).
+  // Pegs and donut arcs sit at the original boundaries; hide them while the
+  // segments slide to new angles in place (buildWheel re-creates them after).
   for (const peg of pegMeshes) peg.visible = false
+  for (const ring of donutMeshes) ring.visible = false
 
   // The winner's label fades out. Give it private transparent materials so
   // mutating opacity never touches the shared cached text materials used by
