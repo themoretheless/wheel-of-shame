@@ -28,8 +28,11 @@ const {
 const titleInput = ref('')
 const spinning = ref(false)
 const winnerId = ref<string | null>(null)
-const wheelRef = ref<{ dismissWinner: () => void } | null>(null)
+const wheelRef = ref<{ dismissWinner: () => void; resetView: () => void } | null>(null)
 const winnerData = ref<{ id: string; name: string; remaining: number } | null>(null)
+// True while the orbit camera has been dragged off its resting framing; drives
+// the Snap-home reset pill below the header.
+const cameraDrifted = ref(false)
 let isLocalSpin = false
 let pendingSpinResult: import('./types').SpinResult | null = null
 
@@ -282,6 +285,14 @@ function onWinnerReveal(data: { id: string; name: string; remaining: number }) {
   winnerData.value = data
 }
 
+function onCameraDrifted(drifted: boolean) {
+  cameraDrifted.value = drifted
+}
+
+function resetView() {
+  wheelRef.value?.resetView()
+}
+
 function dismissWinner() {
   winnerData.value = null
   wheelRef.value?.dismissWinner()
@@ -401,6 +412,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
     @spin-complete="onSpinComplete"
     @spin-click="handleSpin"
     @winner-reveal="onWinnerReveal"
+    @camera-drifted="onCameraDrifted"
   />
 
   <!-- UI overlay -->
@@ -411,6 +423,25 @@ function onGlobalKeydown(e: KeyboardEvent) {
         <span class="fire-text" data-text="Wheel of Shame">Wheel of Shame</span>
       </h1>
     </header>
+
+    <!-- Snap-home pill: appears when the orbit camera is dragged off its
+         resting framing, restoring the default view on click. -->
+    <Transition name="reset-pill">
+      <button
+        v-if="cameraDrifted"
+        @click="resetView"
+        class="btn btn-small reset-pill"
+        title="Reset camera view"
+      >
+        <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true">
+          <path
+            d="M12 5V2L8 6l4 4V7a5 5 0 1 1-5 5H5a7 7 0 1 0 7-7z"
+            fill="currentColor"
+          />
+        </svg>
+        Reset view
+      </button>
+    </Transition>
 
     <div v-if="loading" class="loading">Loading...</div>
     <div v-if="error" class="error">{{ error }}</div>
@@ -629,6 +660,42 @@ function onGlobalKeydown(e: KeyboardEvent) {
 
 .btn-small:hover {
   background: rgba(255, 255, 255, 0.2);
+}
+
+/* Floating snap-home pill, centered over the wheel below the header. */
+.reset-pill {
+  position: fixed;
+  top: 92px;
+  left: calc((100% - 340px) / 2);
+  transform: translateX(-50%);
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 16px;
+  background: rgba(30, 30, 30, 0.78);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+}
+
+.reset-pill svg {
+  flex: 0 0 auto;
+}
+
+.reset-pill-enter-active,
+.reset-pill-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.reset-pill-enter-from,
+.reset-pill-leave-to {
+  opacity: 0;
+  transform: translate(-50%, -8px);
+}
+
+@media (max-width: 700px) {
+  .reset-pill {
+    left: 50%;
+  }
 }
 
 .btn-warning {

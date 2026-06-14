@@ -21,6 +21,7 @@ const emit = defineEmits<{
   (e: 'spin-complete', participantId: string): void
   (e: 'spin-click', direction: 'left' | 'right'): void
   (e: 'winner-reveal', data: { id: string; name: string; remaining: number }): void
+  (e: 'camera-drifted', drifted: boolean): void
 }>()
 
 const containerRef = ref<HTMLDivElement | null>(null)
@@ -127,6 +128,13 @@ let flickCooldown = 0
 const BASE_CAM_Z = 7.8
 let homeCamZ = BASE_CAM_Z
 const FLICK_THRESHOLD = 0.06 // radians per frame — trigger spin
+// Snap-home: once the orbit camera drifts off its resting framing we surface a
+// reset pill. Tracked with hysteresis so a single threshold-straddling frame
+// doesn't flicker the pill on and off.
+let cameraDrifted = false
+let isResettingView = false
+const CAM_DRIFT_ON = 0.6 // distance from home that raises the pill
+const CAM_DRIFT_OFF = 0.15 // distance below which it is considered home again
 
 const WHEEL_RADIUS = 2.2
 const WHEEL_INNER = 0.6
@@ -1214,6 +1222,24 @@ function startRenderLoop() {
       if (controls) lastAzimuth = controls.getAzimuthalAngle()
     }
 
+    // Surface the reset pill once the user orbits the camera away from its
+    // resting framing. Skipped while a spin/reveal drives the camera itself or
+    // while resetView is animating it back, so the pill only reflects manual
+    // drift. Hysteresis (CAM_DRIFT_ON/OFF) keeps it from flickering.
+    if (!isSpinAnimating && !props.spinning && !isResettingView && controls && controls.enabled) {
+      const dx = camera.position.x
+      const dy = camera.position.y
+      const dz = camera.position.z - homeCamZ
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz)
+      if (!cameraDrifted && dist > CAM_DRIFT_ON) {
+        cameraDrifted = true
+        emit('camera-drifted', true)
+      } else if (cameraDrifted && dist < CAM_DRIFT_OFF) {
+        cameraDrifted = false
+        emit('camera-drifted', false)
+      }
+    }
+
     if (needsRender) {
       needsRender = false
       if (composer) composer.render()
@@ -1330,7 +1356,51 @@ function dismissWinner() {
   }
 }
 
-defineExpose({ dismissWinner })
+// Snap the orbit camera back to its resting framing at (0, 0, homeCamZ),
+// reusing animateSpin's ease-out lerp. Disables controls for the duration so
+// damping doesn't fight the tween, then re-arms drift tracking from rest.
+function resetView() {
+  if (!camera || isSpinAnimating || props.spinning || isResettingView) return
+  isResettingView = true
+  if (controls) controls.enabled = false
+  // Clearing the drifted flag up front lets startRenderLoop re-detect drift
+  // immediately if the user grabs the camera again mid-reset.
+  if (cameraDrifted) {
+    cameraDrifted = false
+    emit('camera-drifted', false)
+  }
+  const camFrom = camera.position.clone()
+  const camHome = new THREE.Vector3(0, 0, homeCamZ)
+  const target = controls?.target ?? new THREE.Vector3(0, 0, 0)
+  const duration = prefersReducedMotion() ? 200 : 600
+  const startTime = performance.now()
+  function frame(now: number) {
+    markDirty()
+    const t = Math.min((now - startTime) / duration, 1)
+    const eased = 1 - Math.pow(1 - t, 2)
+    if (camera) {
+      camera.position.lerpVectors(camFrom, camHome, eased)
+      camera.lookAt(target)
+    }
+    if (t < 1) {
+      requestAnimationFrame(frame)
+    } else {
+      if (camera) {
+        camera.position.copy(camHome)
+        camera.lookAt(target)
+      }
+      if (controls) {
+        controls.update()
+        controls.enabled = true
+        lastAzimuth = controls.getAzimuthalAngle()
+      }
+      isResettingView = false
+    }
+  }
+  requestAnimationFrame(frame)
+}
+
+defineExpose({ dismissWinner, resetView })
 
 // Short percussive click synthesised on each peg strike. Created lazily on the
 // first tick — the spin is click-initiated, so the audio context is allowed to
