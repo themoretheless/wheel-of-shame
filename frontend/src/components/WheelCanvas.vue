@@ -466,6 +466,9 @@ function buildWheelWithAngles(
   segmentMeshes = []
   dividerLines = []
   pegMeshes = []
+  // Old segment meshes are gone; drop any dangling hover reference so the
+  // ease loop doesn't touch a disposed mesh.
+  hoveredSeg = null
   markDirty()
 
   if (active.length === 0) {
@@ -1328,6 +1331,7 @@ function animateSpin() {
 
   isSpinAnimating = true
   setHoveredBtn(null)
+  clearSegmentHover()
   resetSegments()
   pegSpacing = sliceAngle
   prevPegSign = 0
@@ -1435,10 +1439,109 @@ function setHoveredBtn(btn: THREE.Mesh | null) {
   markDirty()
 }
 
+// Metallic segment hover lift: the slice under the cursor eases up in Z and
+// gains a faint emissive glow, reusing animateWinnerReveal's clone-and-bump
+// pattern so the shared cached segment material stays untouched. Only one
+// segment is lifted at a time; the previous one eases back down.
+const SEG_HOVER_LIFT = 0.08
+let hoveredSeg: THREE.Mesh | null = null
+let segHoverAnimating = false
+
+function liftMaterial(seg: THREE.Mesh): THREE.MeshStandardMaterial {
+  // Clone once into a private emissive material; restore-on-leave is handled by
+  // settling position only — the clone is cheap to keep and reused on re-hover.
+  if (!seg.userData.hoverBaseMaterial) {
+    const base = seg.material as THREE.MeshStandardMaterial
+    const glow = base.clone()
+    glow.emissive = new THREE.Color(base.color)
+    glow.emissiveIntensity = 0
+    seg.userData.hoverBaseMaterial = base
+    seg.material = glow
+  }
+  return seg.material as THREE.MeshStandardMaterial
+}
+
+function setHoveredSegment(seg: THREE.Mesh | null) {
+  if (seg === hoveredSeg) return
+  hoveredSeg = seg
+  if (!segHoverAnimating) {
+    segHoverAnimating = true
+    requestAnimationFrame(segHoverFrame)
+  }
+}
+
+// Synchronously drop any lifted segment back to rest (used when a spin starts,
+// where resetSegments force-snaps Z and the eased clones must not linger).
+function clearSegmentHover() {
+  hoveredSeg = null
+  const baseZ = -WHEEL_DEPTH / 2
+  for (const seg of segmentMeshes) {
+    if (!seg || seg.userData.hoverBaseMaterial === undefined) continue
+    if (seg.userData.baseMaterial) continue // owned by the winner reveal
+    ;(seg.material as THREE.MeshStandardMaterial).dispose()
+    seg.material = seg.userData.hoverBaseMaterial as THREE.MeshStandardMaterial
+    delete seg.userData.hoverBaseMaterial
+    seg.position.z = baseZ
+  }
+  markDirty()
+}
+
+// Eases every lifted segment toward its target (raised + glowing when hovered,
+// flat + dark otherwise) and stops once they have all settled. A segment that
+// reaches its lifted target is held in place (loop pauses, no idle re-renders);
+// a segment that returns to rest drops its private clone. Skips the winner
+// segment, which animateWinnerReveal owns via userData.baseMaterial.
+const SEG_HOVER_GLOW = 0.45
+
+function segHoverFrame() {
+  let moving = false
+  const baseZ = -WHEEL_DEPTH / 2
+  for (const seg of segmentMeshes) {
+    if (!seg) continue
+    if (seg.userData.baseMaterial) continue // owned by the winner reveal
+    const lifted = seg.userData.hoverBaseMaterial !== undefined
+    const isHovered = seg === hoveredSeg && !isSpinAnimating && !props.spinning
+    if (!lifted) {
+      if (!isHovered) continue
+      liftMaterial(seg)
+    }
+    const targetZ = isHovered ? baseZ + SEG_HOVER_LIFT : baseZ
+    const targetGlow = isHovered ? SEG_HOVER_GLOW : 0
+    const glow = seg.material as THREE.MeshStandardMaterial
+    seg.position.z += (targetZ - seg.position.z) * 0.2
+    glow.emissiveIntensity += (targetGlow - glow.emissiveIntensity) * 0.2
+    const atTarget =
+      Math.abs(targetZ - seg.position.z) < 0.001 &&
+      Math.abs(targetGlow - glow.emissiveIntensity) < 0.005
+    if (!atTarget) {
+      moving = true
+      continue
+    }
+    if (isHovered) {
+      // Settled at the lifted target: snap exactly and stop animating this one.
+      seg.position.z = targetZ
+      glow.emissiveIntensity = targetGlow
+    } else {
+      // Returned to rest: drop the private clone and restore the shared material.
+      seg.position.z = baseZ
+      glow.dispose()
+      seg.material = seg.userData.hoverBaseMaterial as THREE.MeshStandardMaterial
+      delete seg.userData.hoverBaseMaterial
+    }
+  }
+  markDirty()
+  if (moving) {
+    requestAnimationFrame(segHoverFrame)
+  } else {
+    segHoverAnimating = false
+  }
+}
+
 function onCanvasMouseMove(e: MouseEvent) {
   if (!renderer || !camera) return
   if (props.spinning || isSpinAnimating) {
     setHoveredBtn(null)
+    setHoveredSegment(null)
     return
   }
   const rect = renderer.domElement.getBoundingClientRect()
@@ -1458,6 +1561,16 @@ function onCanvasMouseMove(e: MouseEvent) {
     }
   }
   setHoveredBtn(hit)
+
+  // A button takes priority over the segment beneath it. Otherwise lift the
+  // nearest segment the ray hits.
+  let segHit: THREE.Mesh | null = null
+  if (!hit) {
+    const segs = segmentMeshes.filter((m): m is THREE.Mesh => m !== null)
+    const segHits = raycaster.intersectObjects(segs, false)
+    if (segHits.length > 0) segHit = segHits[0].object as THREE.Mesh
+  }
+  setHoveredSegment(segHit)
 }
 
 watch(
