@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import type { Participant } from '../types'
+import { identityColor } from '../utils/identity'
+
+// First visible character, upper-cased, for the round identity token.
+function initialOf(name: string): string {
+  return (name.trim()[0] ?? '?').toUpperCase()
+}
 
 defineProps<{
   active: Participant[]
@@ -56,7 +62,12 @@ function addName() {
           class="participant-item"
           :class="{ pending: p.pending, error: p.error }"
         >
-          <span>{{ p.name }}</span>
+          <span class="name-cell">
+            <span class="identity-token" :style="{ background: identityColor(p.name) }">{{
+              initialOf(p.name)
+            }}</span>
+            <span class="name-text">{{ p.name }}</span>
+          </span>
           <button
             v-if="!p.pending"
             @click="emit('remove', p.id)"
@@ -74,7 +85,12 @@ function addName() {
       <h3>Picked ({{ removed.length }})</h3>
       <ol>
         <li v-for="p in removed" :key="p.id" class="participant-item picked">
-          <span>#{{ p.spin_order }} — {{ p.name }}</span>
+          <span class="name-cell">
+            <span class="identity-token" :style="{ background: identityColor(p.name) }">{{
+              initialOf(p.name)
+            }}</span>
+            <span class="name-text">#{{ p.spin_order }} — {{ p.name }}</span>
+          </span>
         </li>
       </ol>
       <button @click="emit('reset')" class="btn btn-reset">Reset All</button>
@@ -164,6 +180,35 @@ ol {
   border-radius: 6px;
   margin-bottom: 4px;
   background: rgba(255, 255, 255, 0.05);
+}
+
+.name-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.name-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Round identity token: deterministic per-name color matching the wheel
+   segment, with the participant's initial. */
+.identity-token {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: bold;
+  color: #2d3436;
+  text-decoration: none;
 }
 
 .participant-item.picked {

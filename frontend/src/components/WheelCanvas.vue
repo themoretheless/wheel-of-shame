@@ -9,6 +9,7 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js'
 import opentype from 'opentype.js'
 import type { Participant } from '../types'
+import { identityColor } from '../utils/identity'
 
 const props = defineProps<{
   participants: Participant[]
@@ -23,13 +24,6 @@ const emit = defineEmits<{
 }>()
 
 const containerRef = ref<HTMLDivElement | null>(null)
-
-const COLORS = [
-  '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4',
-  '#FFEAA7', '#DDA0DD', '#98D8C8', '#F7DC6F',
-  '#BB8FCE', '#85C1E9', '#F0B27A', '#82E0AA',
-  '#F1948A', '#AED6F1', '#D7BDE2', '#A3E4D7',
-]
 
 let renderer: THREE.WebGLRenderer | null = null
 let composer: EffectComposer | null = null
@@ -523,7 +517,7 @@ function buildWheelWithAngles(
     }
     const startAngle = cursor
     cursor += segAngle
-    const color = COLORS[i % COLORS.length]
+    const color = identityColor(p.name)
 
     const mesh = new THREE.Mesh(getSegmentGeometry(segAngle), getCachedMat(color, 0.1, 0.55))
     mesh.position.z = -WHEEL_DEPTH / 2
