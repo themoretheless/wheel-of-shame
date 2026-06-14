@@ -61,6 +61,12 @@ let pegMeshes: THREE.Mesh[] = []
 let donutMeshes: THREE.Mesh[] = [] // per-segment odds-donut arcs around the hub
 let pegSpacing = 0 // angular gap between pegs during the active spin
 let prevPegSign = 0 // sign of the nearest-peg offset, to detect crossings
+// Squash-and-stretch on the pointer tip. squash is a signed scalar (+contact
+// compresses the tip, the spring overshoots negative into a stretch on release);
+// squashVel integrates it frame to frame so the rebound is springy, not linear.
+let squash = 0
+let squashVel = 0
+let lastFlapTime = 0 // performance.now() of the previous updateFlapper, for dt
 // Active participant ids in segment order, captured at spin start so updateFlapper
 // can name the segment currently under the pointer for the roster-row spotlight.
 let spinSegmentIds: string[] = []
@@ -1513,6 +1519,37 @@ function updateFlapper(intensity: number) {
   }
   pegPivot.rotation.z = -dir * deflect
 
+  // Tactile squash-and-stretch: the same contact factor that bends the tip also
+  // compresses it (scale.y down / scale.x up), and a critically-damped-ish spring
+  // lets it overshoot into a brief stretch as the peg releases. Skipped under
+  // reduced motion, where the tip holds its rest scale.
+  if (pointerMesh) {
+    if (prefersReducedMotion()) {
+      if (squash !== 0 || squashVel !== 0) {
+        squash = 0
+        squashVel = 0
+        pointerMesh.scale.set(1, 1, 1)
+      }
+    } else {
+      const now = performance.now()
+      // Clamp dt so a backgrounded tab resuming doesn't explode the spring.
+      const dt = lastFlapTime > 0 ? Math.min((now - lastFlapTime) / 1000, 0.05) : 0.016
+      lastFlapTime = now
+      // Drive toward the live contact factor; the spring's overshoot supplies the
+      // stretch, so the target itself is just the squash side.
+      const contactFactor = maxDeflect > 0 ? deflect / maxDeflect : 0
+      const stiffness = 220
+      const damping = 18
+      squashVel += (stiffness * (contactFactor - squash) - damping * squashVel) * dt
+      squash += squashVel * dt
+      // Positive squash shortens the tip and fattens it; negative (overshoot)
+      // stretches it. amount keeps the visual deflection modest.
+      const amount = 0.32 * intensity
+      pointerMesh.scale.y = 1 - amount * squash
+      pointerMesh.scale.x = 1 + amount * 0.7 * squash
+    }
+  }
+
   // Tick only on a crossing of the tip itself (m through 0), not on the
   // half-way handover between pegs (m near ±spacing/2).
   const sign = m >= 0 ? 1 : -1
@@ -1537,6 +1574,15 @@ function updateFlapper(intensity: number) {
   }
 }
 
+// Restore the pointer tip to its rest scale and clear the squash spring, so the
+// next spin starts from a neutral shape regardless of where the last one stopped.
+function resetSquash() {
+  squash = 0
+  squashVel = 0
+  lastFlapTime = 0
+  if (pointerMesh) pointerMesh.scale.set(1, 1, 1)
+}
+
 // Moderate "tip-over": after the wheel lands it rocks slightly past the final
 // peg and settles back, selling the last bit of momentum.
 function animateSettle(target: number, onDone: () => void) {
@@ -1558,6 +1604,7 @@ function animateSettle(target: number, onDone: () => void) {
       currentRotation = target
       if (wheelGroup) wheelGroup.rotation.z = target
       if (pegPivot) pegPivot.rotation.z = 0
+      resetSquash()
       onDone()
     }
   }
@@ -1608,6 +1655,7 @@ function animateSpin() {
   resetSegments()
   pegSpacing = sliceAngle
   prevPegSign = 0
+  resetSquash()
   // Segment-order ids for the roster-row spotlight; reset the change tracker so
   // the first crossing emits even if it lands on the same id as a prior spin.
   spinSegmentIds = active.map((p) => p.id)
@@ -1738,6 +1786,7 @@ function animateSpin() {
         currentRotation = startRot + totalRotation
         if (wheelGroup) wheelGroup.rotation.z = currentRotation
         if (pegPivot) pegPivot.rotation.z = 0
+        resetSquash()
         landed()
       } else {
         // Land, then rock over the last peg before revealing the winner.
