@@ -26,6 +26,7 @@ const {
   loading,
   error,
   remoteSpinResult,
+  recentSessions,
   wsConnected,
   create,
   load,
@@ -50,6 +51,32 @@ const winnerData = ref<{ id: string; name: string; remaining: number } | null>(n
 // True while the orbit camera has been dragged off its resting framing; drives
 // the Snap-home reset pill below the header.
 const cameraDrifted = ref(false)
+
+// Recents switcher: a dropdown next to the session title listing other sessions
+// this browser has visited (from localStorage via useSession), so a returning
+// visitor can hop back without keeping links around. Excludes the current
+// session; picking one loads it and updates the URL hash.
+const recentsOpen = ref(false)
+const otherRecents = computed(() =>
+  recentSessions.value.filter((r) => r.id !== session.value?.id),
+)
+function switchSession(id: string) {
+  recentsOpen.value = false
+  if (id === session.value?.id) return
+  window.location.hash = `#/${id}`
+  load(id)
+}
+function toggleRecents() {
+  recentsOpen.value = !recentsOpen.value
+}
+// Close the recents dropdown when a pointer lands outside the switcher.
+function onDocPointerDown(e: PointerEvent) {
+  if (!recentsOpen.value) return
+  const target = e.target as Element | null
+  if (target && !target.closest('.session-switcher')) {
+    recentsOpen.value = false
+  }
+}
 // Participant id whose wheel segment is currently under the pointer mid-spin;
 // NameList flashes the matching roster row in sync. Null when not spinning.
 const tickingId = ref<string | null>(null)
@@ -333,12 +360,14 @@ onMounted(() => {
   }
   initFlame()
   window.addEventListener('keydown', onGlobalKeydown)
+  window.addEventListener('pointerdown', onDocPointerDown)
 })
 
 onBeforeUnmount(() => {
   cancelAnimationFrame(flameAnimId)
   flameCleanup?.()
   window.removeEventListener('keydown', onGlobalKeydown)
+  window.removeEventListener('pointerdown', onDocPointerDown)
 })
 
 // A SpinResult from another client: drive the wheel to that winner with the
@@ -533,6 +562,14 @@ function onGlobalKeydown(e: KeyboardEvent) {
   // The command palette owns the keyboard while it's open (Escape closes it).
   if (paletteOpen.value) return
 
+  // Escape closes the recents switcher first if it's open, so the key doesn't
+  // also dismiss the winner modal underneath.
+  if (recentsOpen.value && e.key === 'Escape') {
+    e.preventDefault()
+    recentsOpen.value = false
+    return
+  }
+
   // The cheat-sheet captures Escape to close itself; everything else is inert
   // beneath it, so handle that case before the shortcuts it documents.
   if (shortcutsOpen.value) {
@@ -620,7 +657,37 @@ function onGlobalKeydown(e: KeyboardEvent) {
     <!-- Session screen -->
     <div v-if="session" class="session-screen">
       <div class="session-header">
-        <h2 class="session-title" :title="session.title">{{ session.title }}</h2>
+        <!-- Session title doubles as a recents switcher: when this browser has
+             visited other sessions, a chevron reveals a dropdown to hop back. -->
+        <div class="session-switcher">
+          <h2 class="session-title" :title="session.title">{{ session.title }}</h2>
+          <button
+            v-if="otherRecents.length > 0"
+            class="btn btn-small switcher-toggle"
+            :class="{ open: recentsOpen }"
+            :aria-expanded="recentsOpen"
+            aria-haspopup="listbox"
+            title="Switch session"
+            @click.stop="toggleRecents"
+          >
+            <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true">
+              <path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </button>
+          <Transition name="recents-menu">
+            <ul
+              v-if="recentsOpen && otherRecents.length > 0"
+              class="recents-menu"
+              role="listbox"
+            >
+              <li v-for="r in otherRecents" :key="r.id" role="option">
+                <button class="recents-item" @click="switchSession(r.id)">
+                  <span class="recents-title">{{ r.title }}</span>
+                </button>
+              </li>
+            </ul>
+          </Transition>
+        </div>
         <div class="session-actions">
           <span class="ws-status" :class="{ connected: wsConnected }">
             {{ wsConnected ? 'Live' : 'Offline' }}
@@ -1144,10 +1211,20 @@ function onGlobalKeydown(e: KeyboardEvent) {
   margin-bottom: 24px;
 }
 
+/* Switcher wrapper: holds the title and its dropdown trigger, and anchors the
+   absolutely-positioned recents menu below the header. */
+.session-switcher {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
 .session-title {
   margin: 0;
   min-width: 0;
-  flex: 1;
   font-size: 20px;
   font-weight: 600;
   color: #dfe6e9;
@@ -1155,6 +1232,89 @@ function onGlobalKeydown(e: KeyboardEvent) {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Chevron toggle: a small glass chip reusing .btn-small, revealing the recents
+   list. Rotates its caret when the menu is open. */
+.switcher-toggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 7px;
+  border-radius: 8px;
+}
+
+.switcher-toggle svg {
+  transition: transform 0.18s ease;
+}
+
+.switcher-toggle.open svg {
+  transform: rotate(180deg);
+}
+
+/* Recents dropdown: a glass panel matching .reset-pill, listing other sessions
+   this browser has visited so the user can hop back without a link. */
+.recents-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 20;
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  min-width: 200px;
+  max-width: 280px;
+  max-height: 50vh;
+  overflow-y: auto;
+  border-radius: 12px;
+  background: rgba(30, 30, 30, 0.92);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+
+.recents-item {
+  display: flex;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: #dfe6e9;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.recents-item:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.recents-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recents-menu-enter-active,
+.recents-menu-leave-active {
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.recents-menu-enter-from,
+.recents-menu-leave-to {
+  opacity: 0;
+  transform: translateY(-6px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .switcher-toggle svg,
+  .recents-menu-enter-active,
+  .recents-menu-leave-active {
+    transition: none;
+  }
 }
 
 .session-actions {

@@ -13,6 +13,59 @@ const loading = ref(false)
 const error = ref<string | null>(null)
 const lastSpinResult = ref<SpinResult | null>(null)
 
+// --- Pinned recents (frecency-lite) ---
+//
+// Every session successfully loaded or created is remembered in localStorage as
+// {id, title, lastUsed}, deduped by id and capped, so a returning visitor can
+// hop back to a recent room without keeping its link around. The list is sorted
+// most-recent-first and surfaced through `recentSessions` for the App.vue
+// switcher chip. Storage failures (private mode, quota) are swallowed: recents
+// are a convenience, never load-bearing.
+export interface RecentSession {
+  id: string
+  title: string
+  lastUsed: number
+}
+
+const RECENTS_KEY = 'wheel-recent-sessions'
+const RECENTS_CAP = 8
+
+const recentSessions = ref<RecentSession[]>(readRecents())
+
+function readRecents(): RecentSession[] {
+  try {
+    const raw = localStorage.getItem(RECENTS_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed
+      .filter(
+        (r): r is RecentSession =>
+          r != null &&
+          typeof r.id === 'string' &&
+          typeof r.title === 'string' &&
+          typeof r.lastUsed === 'number',
+      )
+      .sort((a, b) => b.lastUsed - a.lastUsed)
+      .slice(0, RECENTS_CAP)
+  } catch {
+    return []
+  }
+}
+
+function rememberSession(s: Session) {
+  const next: RecentSession[] = [
+    { id: s.id, title: s.title, lastUsed: Date.now() },
+    ...recentSessions.value.filter((r) => r.id !== s.id),
+  ].slice(0, RECENTS_CAP)
+  recentSessions.value = next
+  try {
+    localStorage.setItem(RECENTS_KEY, JSON.stringify(next))
+  } catch {
+    // Persisting recents is best-effort; ignore storage failures.
+  }
+}
+
 // Remote spin events (from other clients)
 const remoteSpinResult = ref<SpinResult | null>(null)
 let suppressWsSpin = false
@@ -195,6 +248,7 @@ export function useSession() {
       cancelReconnect()
       session.value = await api.createSession(title)
       participants.value = []
+      rememberSession(session.value)
       window.location.hash = `#/${session.value.id}`
       ws.connect(session.value.id)
     } catch (e: any) {
@@ -212,6 +266,7 @@ export function useSession() {
       const data = await api.getSession(id)
       session.value = data.session
       participants.value = data.participants
+      rememberSession(data.session)
       ws.connect(id)
     } catch (e: any) {
       error.value = e.message
@@ -343,6 +398,7 @@ export function useSession() {
     error,
     lastSpinResult,
     remoteSpinResult,
+    recentSessions,
     wsConnected: ws.connected,
     create,
     load,
