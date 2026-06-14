@@ -134,6 +134,16 @@ function markDirty() {
   needsRender = true
 }
 
+// Accessibility: when the OS requests reduced motion we collapse the long,
+// camera-swinging animations (coin drop, multi-spin, settle rock) into short
+// near-instant transitions and skip the bloom pass. Read live so toggling the
+// OS setting takes effect on the next spin without a reload.
+function prefersReducedMotion(): boolean {
+  return typeof window !== 'undefined'
+    && typeof window.matchMedia === 'function'
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+}
+
 // Curved (arc-bent) text geometry depends only on (text, size, depth) — the
 // bend radius is constant — so it is cached and shared between rebuilds.
 const curvedTextGeoCache = new Map<string, THREE.BufferGeometry>()
@@ -910,7 +920,11 @@ function initScene() {
   composer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
   composer.setSize(w, h)
   composer.addPass(new RenderPass(scene, camera))
-  composer.addPass(new UnrealBloomPass(new THREE.Vector2(w, h), 0.55, 0.5, 0.85))
+  // Skip the bloom pass under reduced motion: the glow exists to sell the
+  // animated winner lift, and dropping it keeps the static frame calmer.
+  if (!prefersReducedMotion()) {
+    composer.addPass(new UnrealBloomPass(new THREE.Vector2(w, h), 0.55, 0.5, 0.85))
+  }
   composer.addPass(new OutputPass())
 
   controls = new OrbitControls(camera, renderer.domElement)
@@ -997,6 +1011,20 @@ function initScene() {
 
 function animateCoinDrop() {
   if (!camera || !controls || !pointerMesh || !wheelGroup) return
+
+  // Reduced motion: skip the tumbling drop and the swooping camera; place the
+  // wheel and camera directly at their resting framing.
+  if (prefersReducedMotion()) {
+    wheelGroup.position.set(0, 0, 0)
+    wheelGroup.rotation.set(0, 0, 0)
+    camera.position.set(0, 0, camera.position.z)
+    camera.lookAt(0, 0, 0)
+    controls.update()
+    controls.enabled = true
+    pointerMesh.visible = true
+    markDirty()
+    return
+  }
 
   controls.enabled = false
   pointerMesh.visible = false
@@ -1311,14 +1339,19 @@ function animateSpin() {
   } else {
     while (delta >= 0) delta -= Math.PI * 2
   }
-  const fullSpins = Math.PI * 2 * (5 + Math.floor(Math.random() * 3)) * spinDirection
+  // Reduced motion: a single rotation into the winner over a short window,
+  // with no anticipation wind-up and no multi-revolution blur.
+  const reducedMotion = prefersReducedMotion()
+  const fullSpins = reducedMotion
+    ? 0
+    : Math.PI * 2 * (5 + Math.floor(Math.random() * 3)) * spinDirection
   const totalRotation = fullSpins + delta
-  const duration = 4000
+  const duration = reducedMotion ? 600 : 4000
   // Anticipation wind-up: a brief reverse rotation that loads the spin before
   // it launches forward. The wheel still lands at startRot + totalRotation, so
   // the main phase travels (totalRotation - windUpAngle) from the wound point.
-  const windUpDuration = 250
-  const windUpAngle = -spinDirection * 0.12
+  const windUpDuration = reducedMotion ? 0 : 250
+  const windUpAngle = reducedMotion ? 0 : -spinDirection * 0.12
   const startTime = performance.now()
   const startRot = currentRotation
   const mainStartRot = startRot + windUpAngle
@@ -1333,7 +1366,7 @@ function animateSpin() {
 
   const camFrom = camera.position.clone()
   const camHome = new THREE.Vector3(0, 0, homeCamZ)
-  const camReturnDuration = 800
+  const camReturnDuration = reducedMotion ? 300 : 800
 
   function frame(now: number) {
     markDirty()
@@ -1378,8 +1411,7 @@ function animateSpin() {
     if (t < 1) {
       requestAnimationFrame(frame)
     } else {
-      // Land, then rock over the last peg before revealing the winner.
-      animateSettle(startRot + totalRotation, () => {
+      const landed = () => {
         isSpinAnimating = false
         azimuthVelocity = 0
         flickCooldown = 120
@@ -1400,7 +1432,18 @@ function animateSpin() {
             emit('spin-complete', props.winnerId!)
           },
         )
-      })
+      }
+
+      if (reducedMotion) {
+        // Snap to the final angle and reveal, no rock-over-the-last-peg.
+        currentRotation = startRot + totalRotation
+        if (wheelGroup) wheelGroup.rotation.z = currentRotation
+        if (pegPivot) pegPivot.rotation.z = 0
+        landed()
+      } else {
+        // Land, then rock over the last peg before revealing the winner.
+        animateSettle(startRot + totalRotation, landed)
+      }
     }
   }
 

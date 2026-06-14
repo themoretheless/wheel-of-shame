@@ -132,9 +132,14 @@ function initFlame() {
     clearTimeout(resizeTimer)
   }
 
+  // Reduced motion: thin the flame to a low flicker rather than a full blaze.
+  const reducedMotion = typeof window.matchMedia === 'function'
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  const spawnPerFrame = reducedMotion ? 1 : 4
+
   function spawn() {
     if (edgePoints.length === 0) return
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < spawnPerFrame; i++) {
       const pt = edgePoints[Math.floor(Math.random() * edgePoints.length)]
       particles.push({
         x: pt[0],
