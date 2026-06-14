@@ -55,7 +55,10 @@ function addName() {
 
     <div class="participants">
       <h3>Active ({{ active.length }})</h3>
-      <ul v-if="active.length > 0">
+      <!-- Physical eject: when a name leaves the active list (picked by a spin
+           or removed by hand) the row slides out and blurs away while the rows
+           below slide up to fill the gap, instead of vanishing instantly. -->
+      <TransitionGroup v-if="active.length > 0" tag="ul" name="eject">
         <li
           v-for="p in active"
           :key="p.id"
@@ -77,7 +80,7 @@ function addName() {
             &times;
           </button>
         </li>
-      </ul>
+      </TransitionGroup>
       <p v-else class="empty">No participants yet</p>
     </div>
 
@@ -168,6 +171,12 @@ ul, ol {
   margin: 0;
 }
 
+/* Positioning context so an ejecting row (position: absolute during its leave
+   transition) is measured against the list, not the page. */
+ul {
+  position: relative;
+}
+
 ol {
   list-style: none;
 }
@@ -233,6 +242,41 @@ ol {
 @keyframes chip-pulse {
   0%, 100% { opacity: 0.5; }
   50% { opacity: 0.85; }
+}
+
+/* Eject (TransitionGroup): the leaving row is pulled out of flow so the rows
+   below glide up to close the gap (move transition), while the row itself
+   slides right, shrinks and blurs out, giving a physical "flung off the wheel"
+   feel with no confetti. */
+.eject-leave-active {
+  position: absolute;
+  width: 100%;
+}
+
+.eject-leave-to {
+  opacity: 0;
+  transform: translateX(40px) scale(0.85);
+  filter: blur(4px);
+}
+
+.eject-leave-active,
+.eject-move {
+  transition:
+    transform 0.4s cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 0.4s ease,
+    filter 0.4s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .eject-leave-to {
+    transform: none;
+    filter: none;
+  }
+
+  .eject-leave-active,
+  .eject-move {
+    transition: opacity 0.2s ease;
+  }
 }
 
 @keyframes chip-shake {
