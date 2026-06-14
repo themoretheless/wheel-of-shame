@@ -52,6 +52,11 @@ function toggleMute() {
 
 let renderer: THREE.WebGLRenderer | null = null
 let composer: EffectComposer | null = null
+// Bloom pass held so animateSpin can surge its strength with the wheel's
+// energy: bright at launch, easing back to BLOOM_BASE as the spin decelerates.
+// Null under reduced motion (the pass is never added to the chain there).
+let bloomPass: UnrealBloomPass | null = null
+const BLOOM_BASE = 0.55
 let scene: THREE.Scene | null = null
 let camera: THREE.PerspectiveCamera | null = null
 let wheelGroup: THREE.Group | null = null
@@ -1064,7 +1069,8 @@ function initScene() {
   // Skip the bloom pass under reduced motion: the glow exists to sell the
   // animated winner lift, and dropping it keeps the static frame calmer.
   if (!prefersReducedMotion()) {
-    composer.addPass(new UnrealBloomPass(new THREE.Vector2(w, h), 0.55, 0.5, 0.85))
+    bloomPass = new UnrealBloomPass(new THREE.Vector2(w, h), BLOOM_BASE, 0.5, 0.85)
+    composer.addPass(bloomPass)
   }
   composer.addPass(new OutputPass())
 
@@ -1405,6 +1411,9 @@ function animateWinnerReveal(
 
 // Ease the dimmed room back to full and fade the winner spotlight out.
 function restoreLights() {
+  // Snap bloom back to its resting strength in case a spin was cut short before
+  // the surge eased itself down.
+  if (bloomPass) bloomPass.strength = BLOOM_BASE
   if (!spotLight || spotLight.intensity <= 0.001) {
     if (ambientLight) ambientLight.intensity = ambientBaseIntensity
     if (keyLight) keyLight.intensity = keyBaseIntensity
@@ -1800,6 +1809,15 @@ function animateSpin() {
     }
     updateFlapper(t)
 
+    // Spin-energy bloom surge: glow runs hot (~1.1) while the wheel is fast and
+    // eases back to BLOOM_BASE as it decelerates, fully settled by SLOWMO_START
+    // so the slow-mo crawl and winner reveal read clean. bloomPass is null under
+    // reduced motion, so this is implicitly skipped there.
+    if (bloomPass) {
+      const surge = Math.max(0, 1 - t / SLOWMO_START)
+      bloomPass.strength = BLOOM_BASE + 0.55 * surge
+    }
+
     if (camera && spinElapsed < camReturnDuration) {
       const ct = Math.min(spinElapsed / camReturnDuration, 1)
       const ce = 1 - Math.pow(1 - ct, 2)
@@ -2106,6 +2124,10 @@ onBeforeUnmount(() => {
   if (scene && scene.environment) {
     scene.environment.dispose()
     scene.environment = null
+  }
+  if (bloomPass) {
+    bloomPass.dispose()
+    bloomPass = null
   }
   if (composer) composer.dispose()
   if (renderer) {
