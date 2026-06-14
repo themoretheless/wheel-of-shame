@@ -68,6 +68,7 @@ interface Particle {
   life: number
   maxLife: number
   size: number
+  drift?: boolean
 }
 
 // Scanning the full canvas with getImageData on every resize is expensive;
@@ -133,13 +134,24 @@ function initFlame() {
 
   const particles: Particle[] = []
   let edgePoints: [number, number][] = []
+  // The canvas extends EMBER_DRIFT px below the header so the rare drifting
+  // ember can fade out over the wheel region. The title text and its edge
+  // points stay anchored to the header band (the top headerH px), so this
+  // extra height never repositions the flame.
+  const EMBER_DRIFT = 280
+  let headerH = 0
 
   function resize() {
     const header = canvas.parentElement
     if (!header) return
+    headerH = header.clientHeight
     canvas.width = header.clientWidth
-    canvas.height = header.clientHeight
-    edgePoints = getTextEdgePoints(canvas.width, canvas.height)
+    canvas.height = headerH + EMBER_DRIFT
+    // Display the canvas buffer 1:1 so the flame isn't stretched: width fills
+    // the header (== buffer width), height matches the buffer's drift-extended
+    // height and spills below the header band.
+    canvas.style.height = `${canvas.height}px`
+    edgePoints = getTextEdgePoints(canvas.width, headerH)
   }
   resize()
 
@@ -165,14 +177,20 @@ function initFlame() {
     if (edgePoints.length === 0) return
     for (let i = 0; i < spawnPerFrame; i++) {
       const pt = edgePoints[Math.floor(Math.random() * edgePoints.length)]
+      // ~2% of embers break loose and drift down past the header into the
+      // wheel region: a gentle downward drift and a much longer life so they
+      // survive the fall before fading. Reduced motion keeps the flame calm,
+      // so no drifters there.
+      const drifter = !reducedMotion && Math.random() < 0.02
       particles.push({
         x: pt[0],
         y: pt[1],
         vx: (Math.random() - 0.5) * 0.6,
-        vy: -(0.8 + Math.random() * 1.8),
+        vy: drifter ? 0.3 + Math.random() * 0.5 : -(0.8 + Math.random() * 1.8),
         life: 0,
-        maxLife: 20 + Math.random() * 30,
+        maxLife: drifter ? 160 + Math.random() * 80 : 20 + Math.random() * 30,
         size: 4 + Math.random() * 10,
+        drift: drifter,
       })
     }
   }
@@ -186,9 +204,17 @@ function initFlame() {
       p.life++
       p.x += p.vx + (Math.random() - 0.5) * 0.4
       p.y += p.vy
-      p.vy *= 0.97
+      if (p.drift) {
+        // Drifters keep falling: a touch of downward pull (capped) instead of
+        // the rising flame's drag, and a far gentler shrink so they reach the
+        // wheel before winking out.
+        p.vy = Math.min(p.vy + 0.012, 1.0)
+        p.size *= 0.995
+      } else {
+        p.vy *= 0.97
+        p.size *= 0.98
+      }
       p.vx += (Math.random() - 0.5) * 0.1
-      p.size *= 0.98
 
       if (p.life >= p.maxLife || p.size < 0.5) {
         particles.splice(i, 1)
@@ -664,11 +690,18 @@ function onGlobalKeydown(e: KeyboardEvent) {
 
 .flame-canvas {
   position: absolute;
-  inset: 0;
+  top: 0;
+  left: 0;
+  right: 0;
+  /* Spills below the header band so the rare drifting ember can fall over the
+     wheel; the script sets an explicit pixel height (header + drift) so the
+     buffer renders 1:1. Pointer events stay off, so nothing below the header
+     is blocked. z-index:-1 keeps it behind the overlay's panels and title (and
+     above the scrim/wheel), so a drifting ember reads as ambient depth rather
+     than overlapping the session UI. */
   width: 100%;
-  height: 100%;
   pointer-events: none;
-  z-index: 0;
+  z-index: -1;
 }
 
 .fire-title {
