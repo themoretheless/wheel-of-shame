@@ -49,6 +49,18 @@ const cameraDrifted = ref(false)
 // Participant id whose wheel segment is currently under the pointer mid-spin;
 // NameList flashes the matching roster row in sync. Null when not spinning.
 const tickingId = ref<string | null>(null)
+// Identity color of the segment currently under the pointer, pulled through the
+// chrome as the --live-accent CSS var: the dock gains a thin accent bar and the
+// spin vignette's inner stop warms toward this hue, so the active name's color
+// bleeds into the UI in sync with the wheel. Falls back to the brand teal when
+// no segment is ticking (idle, or the id is no longer active).
+const DEFAULT_ACCENT = '#4ECDC4'
+const liveAccent = computed(() => {
+  const id = tickingId.value
+  if (!id) return DEFAULT_ACCENT
+  const hit = activeParticipants.value.find((p) => p.id === id)
+  return hit ? identityColor(hit.name) : DEFAULT_ACCENT
+})
 // Mirror of WheelCanvas's persisted spin-sound mute flag, seeded from the same
 // localStorage key so the dock button shows the right state before the canvas
 // mounts. The toggle below drives the canvas, which owns persistence.
@@ -546,7 +558,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
   />
 
   <!-- UI overlay -->
-  <div class="overlay" :class="{ spinning }">
+  <div class="overlay" :class="{ spinning }" :style="{ '--live-accent': liveAccent }">
     <header class="fire-header">
       <canvas ref="flameCanvas" class="flame-canvas"></canvas>
       <h1 class="fire-title">
@@ -725,7 +737,13 @@ function onGlobalKeydown(e: KeyboardEvent) {
      ramp off this single value, lerped 0 -> 1 while the wheel is spinning so
      the chrome recedes and the wheel reads as the subject (keynote-style). */
   --spin-focus: 0;
-  transition: --spin-focus 0.45s ease;
+  /* Identity color of the segment under the pointer mid-spin (set inline from
+     liveAccent); the dock accent bar and vignette inner stop sample it. Eases
+     between hues as the pointer crosses segments so the tint glides. */
+  --live-accent: #4ECDC4;
+  transition:
+    --spin-focus 0.45s ease,
+    --live-accent 0.25s ease;
 }
 
 .overlay.spinning {
@@ -739,6 +757,15 @@ function onGlobalKeydown(e: KeyboardEvent) {
   syntax: '<number>';
   inherits: true;
   initial-value: 0;
+}
+
+/* Register --live-accent as a color so it interpolates between hues; without
+   this browsers treat it as a discrete string and the tint snaps between
+   segments. The inline value on .overlay still applies as a fallback. */
+@property --live-accent {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #4ECDC4;
 }
 
 /* Frosted scrim: a fixed darkening layer that sits above the 3D wheel
@@ -756,10 +783,13 @@ function onGlobalKeydown(e: KeyboardEvent) {
   background:
     /* Pre-spin focus layer: a center-weighted vignette that fades up only while
        spinning (alpha keyed to --spin-focus), pulling edge contrast down so the
-       wheel pops. Sits first so the resting scrims below still read normally. */
+       wheel pops. Sits first so the resting scrims below still read normally.
+       The inner stop is warmed toward --live-accent (the ticking segment's hue)
+       so the wheel's center subtly glows in the active name's color mid-spin;
+       the tint is itself scaled by --spin-focus so it only shows while spinning. */
     radial-gradient(
       ellipse 75% 75% at center,
-      transparent 40%,
+      color-mix(in srgb, var(--live-accent) calc(10% * var(--spin-focus)), transparent) 38%,
       rgba(0, 0, 0, calc(0.5 * var(--spin-focus))) 100%
     ),
     radial-gradient(
@@ -975,7 +1005,30 @@ function onGlobalKeydown(e: KeyboardEvent) {
   background: rgba(30, 30, 30, 0.78);
   backdrop-filter: blur(8px);
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
   transition: opacity 0.45s ease, filter 0.45s ease;
+}
+
+/* Live accent bar: a 2px gradient hairline along the top of the dock, tinted to
+   the ticking segment's identity color via --live-accent. Its opacity is keyed
+   to --spin-focus so it only lights up mid-spin (when a name is under the
+   pointer) and stays invisible at rest. */
+.action-dock::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--live-accent),
+    transparent
+  );
+  opacity: var(--spin-focus);
+  transition: opacity 0.45s ease;
 }
 
 .action-dock .btn-small {
