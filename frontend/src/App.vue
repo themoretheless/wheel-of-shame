@@ -12,8 +12,12 @@ import NameList from './components/NameList.vue'
 import SpinResultModal from './components/SpinResult.vue'
 import CommandPalette, { type Command } from './components/CommandPalette.vue'
 import ShortcutsSheet from './components/ShortcutsSheet.vue'
+import ToastStack from './components/ToastStack.vue'
 import { useSession } from './composables/useSession'
+import { useToasts } from './composables/useToasts'
 import { identityColor } from './utils/identity'
+
+const { push: pushToast } = useToasts()
 
 const {
   session,
@@ -417,7 +421,10 @@ function onSpinComplete(_participantId: string) {
 function copyLink() {
   if (!session.value) return
   const url = `${window.location.origin}${window.location.pathname}#/${session.value.id}`
-  navigator.clipboard.writeText(url)
+  navigator.clipboard.writeText(url).then(
+    () => pushToast('Share link copied', 'success'),
+    () => pushToast('Could not copy link', 'info'),
+  )
 }
 
 // --- Command palette (Cmd-K / Ctrl-K) ---
@@ -724,6 +731,10 @@ function onGlobalKeydown(e: KeyboardEvent) {
   />
 
   <ShortcutsSheet :open="shortcutsOpen" @close="shortcutsOpen = false" />
+
+  <Teleport to="body">
+    <ToastStack />
+  </Teleport>
 </template>
 
 <style scoped>

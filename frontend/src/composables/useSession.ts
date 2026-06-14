@@ -2,6 +2,10 @@ import { ref, computed } from 'vue'
 import type { Session, Participant, SpinResult } from '../types'
 import * as api from '../api/client'
 import { useWebSocket } from './useWebSocket'
+import { useToasts } from './useToasts'
+import { identityColor } from '../utils/identity'
+
+const { push: pushToast } = useToasts()
 
 const session = ref<Session | null>(null)
 const participants = ref<Participant[]>([])
@@ -109,15 +113,28 @@ ws.onMessage((event: any) => {
       const exists = participants.value.some((p) => p.id === event.participant.id)
       if (!exists) {
         participants.value.push(event.participant)
+        // A name we didn't have yet arrived over the wire: another client added
+        // it. (Our own adds are reconciled by id and already present, so they
+        // don't toast here.)
+        pushToast(
+          `${event.participant.name} joined`,
+          'info',
+          identityColor(event.participant.name),
+        )
       }
       break
     }
     case 'participants_added': {
+      let added = 0
       for (const p of event.participants) {
         const exists = participants.value.some((ep) => ep.id === p.id)
         if (!exists) {
           participants.value.push(p)
+          added++
         }
+      }
+      if (added > 0) {
+        pushToast(`${added} ${added === 1 ? 'name' : 'names'} added`, 'info')
       }
       break
     }
@@ -142,11 +159,19 @@ ws.onMessage((event: any) => {
         picked: event.picked,
         remaining: event.remaining,
       }
+      // Note a remote spin's outcome; the local winner reveal modal already
+      // covers our own spins (those set suppressWsSpin above).
+      pushToast(
+        `${event.picked.name} was picked`,
+        'spin',
+        identityColor(event.picked.name),
+      )
       break
     }
     case 'session_reset': {
       participants.value = event.participants
       lastSpinResult.value = null
+      pushToast('Session reset', 'info')
       break
     }
   }
