@@ -16,6 +16,9 @@ export interface Command {
   hint?: string
   // A secondary line under the label (e.g. a participant's win odds).
   subtitle?: string
+  // A section label (e.g. 'Actions' / 'Eliminate'); commands sharing one get a
+  // sticky group header above the first row of that group.
+  group?: string
   // Returning false keeps the palette open (e.g. an inline name entry that
   // wants another value); anything else closes it.
   run: () => void | boolean
@@ -84,6 +87,21 @@ const filtered = computed(() => {
     .filter((entry) => entry.score >= 0)
     .sort((a, b) => b.score - a.score)
     .map((entry) => entry.c)
+})
+
+// The command under the highlight, surfaced in the footer's action hint.
+const activeCommand = computed(() => filtered.value[activeIndex.value] ?? null)
+
+// Pair each filtered command with the group header to show above it: a label is
+// rendered only when the command's group differs from the previous visible row,
+// so contiguous groups get a single sticky separator (and ungrouped rows none).
+const rows = computed(() => {
+  let prevGroup: string | undefined
+  return filtered.value.map((c) => {
+    const header = c.group && c.group !== prevGroup ? c.group : null
+    prevGroup = c.group
+    return { c, header }
+  })
 })
 
 // Reset to a clean state and focus the input each time the palette opens.
@@ -217,24 +235,34 @@ function onKeydown(e: KeyboardEvent) {
             @keydown="onKeydown"
           />
           <ul class="palette-list">
-            <li
-              v-for="(cmd, i) in filtered"
-              :key="cmd.id"
-              class="palette-item"
-              :class="{ active: i === activeIndex }"
-              @mouseenter="activeIndex = i"
-              @click="runActive"
-            >
-              <span class="palette-text">
-                <span class="palette-label">{{ cmd.label }}</span>
-                <span v-if="cmd.subtitle" class="palette-subtitle">{{ cmd.subtitle }}</span>
-              </span>
-              <span v-if="cmd.hint" class="palette-hint">{{ cmd.hint }}</span>
-            </li>
+            <template v-for="(row, i) in rows" :key="row.c.id">
+              <li v-if="row.header" class="palette-group">{{ row.header }}</li>
+              <li
+                class="palette-item"
+                :class="{ active: i === activeIndex }"
+                @mouseenter="activeIndex = i"
+                @click="runActive"
+              >
+                <span class="palette-text">
+                  <span class="palette-label">{{ row.c.label }}</span>
+                  <span v-if="row.c.subtitle" class="palette-subtitle">{{ row.c.subtitle }}</span>
+                </span>
+                <span v-if="row.c.hint" class="palette-hint">{{ row.c.hint }}</span>
+              </li>
+            </template>
             <li v-if="filtered.length === 0" class="palette-empty">
               No matching commands
             </li>
           </ul>
+          <!-- Raycast-style footer: echoes the highlighted command and the key
+               that runs it, so the primary action is always visible. -->
+          <div v-if="activeCommand" class="palette-footer">
+            <span class="palette-footer-label">{{ activeCommand.label }}</span>
+            <span class="palette-footer-action">
+              {{ activeCommand.inline ? 'Continue' : 'Run' }}
+              <kbd class="palette-kbd">↵</kbd>
+            </span>
+          </div>
         </template>
       </div>
     </div>
@@ -336,6 +364,21 @@ function onKeydown(e: KeyboardEvent) {
   overflow-y: auto;
 }
 
+/* Sticky section header that rides the top of the scroll area as its group
+   scrolls past, grouping commands the way Raycast does. */
+.palette-group {
+  position: sticky;
+  top: 0;
+  padding: 8px 14px 4px;
+  background: rgba(45, 52, 54, 0.92);
+  color: #8d9aa1;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  z-index: 1;
+}
+
 .palette-item {
   display: flex;
   justify-content: space-between;
@@ -381,5 +424,49 @@ function onKeydown(e: KeyboardEvent) {
   text-align: center;
   color: #636e72;
   font-size: 14px;
+}
+
+/* Footer action bar pinned below the list, mirroring the highlighted row's
+   primary action and the key that fires it. */
+.palette-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.palette-footer-label {
+  font-size: 12px;
+  color: #b2bec3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.palette-footer-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: #8d9aa1;
+  white-space: nowrap;
+}
+
+.palette-kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  padding: 1px 5px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #dfe6e9;
+  font-size: 12px;
+  line-height: 1.3;
 }
 </style>

@@ -369,6 +369,7 @@ const paletteCommands = computed<Command[]>(() => [
     id: 'spin',
     label: 'Spin the wheel',
     hint: 'Spin',
+    group: 'Actions',
     disabled: spinning.value || activeParticipants.value.length === 0,
     run: () => {
       handleSpin()
@@ -378,6 +379,7 @@ const paletteCommands = computed<Command[]>(() => [
     id: 'add',
     label: 'Add a name',
     hint: 'New participant',
+    group: 'Actions',
     disabled: !session.value,
     // Opens an inline glass field in the palette rather than a native prompt;
     // returning false keeps it open so several names can be added in a row.
@@ -394,6 +396,7 @@ const paletteCommands = computed<Command[]>(() => [
     id: 'reset',
     label: 'Reset the wheel',
     hint: 'Restore everyone',
+    group: 'Actions',
     disabled: !session.value || removedParticipants.value.length === 0,
     run: () => {
       reset()
@@ -403,6 +406,7 @@ const paletteCommands = computed<Command[]>(() => [
     id: 'copy-link',
     label: 'Copy share link',
     hint: 'Share',
+    group: 'Actions',
     disabled: !session.value,
     run: () => {
       copyLink()
@@ -412,6 +416,7 @@ const paletteCommands = computed<Command[]>(() => [
     id: 'toggle-sound',
     label: soundMuted.value ? 'Unmute spin sound' : 'Mute spin sound',
     hint: soundMuted.value ? 'Unmute' : 'Mute',
+    group: 'Actions',
     run: () => {
       toggleSound()
     },
@@ -425,6 +430,7 @@ const paletteCommands = computed<Command[]>(() => [
       label: `Eliminate ${p.name}`,
       subtitle: `${odds}% to be picked next`,
       hint: 'Remove',
+      group: 'Eliminate',
       run: () => {
         removeName(p.id)
       },
