@@ -26,3 +26,32 @@ export function buildRecapSummary(
   })
   return lines.join('\n')
 }
+
+// A single podium row on the exportable trophy card: the medal tier, the 1-based
+// elimination rank, and the eliminated name. Mirrors NameList's medal tiers (the
+// first three names off the wheel earn gold/silver/bronze in a wheel of shame).
+export interface PodiumRow {
+  tier: 'gold' | 'silver' | 'bronze'
+  rank: number
+  name: string
+}
+
+// The medal colors the trophy card draws, matching NameList's --medal tokens so
+// the shared card reads the same as the live roster.
+export const PODIUM_COLORS: Record<PodiumRow['tier'], string> = {
+  gold: '#ffd54a',
+  silver: '#cfd8dc',
+  bronze: '#d99c66',
+}
+
+// Pick the podium (first three off the wheel) for the trophy card, in spin
+// order. `picked` is already earliest-first, so the slice maps straight onto the
+// gold/silver/bronze tiers. Rank uses spin_order when present, else the position.
+export function buildPodium(picked: readonly Participant[]): PodiumRow[] {
+  const tiers: PodiumRow['tier'][] = ['gold', 'silver', 'bronze']
+  return picked.slice(0, 3).map((p, i) => ({
+    tier: tiers[i],
+    rank: p.spin_order ?? i + 1,
+    name: p.name,
+  }))
+}

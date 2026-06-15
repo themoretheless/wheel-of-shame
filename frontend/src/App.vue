@@ -533,6 +533,16 @@ function copyRecap(summary: string) {
   )
 }
 
+// Result of the recap reel's one-tap trophy-image export. RecapReel owns the
+// canvas draw and clipboard write (it needs the live DOM canvas); App.vue only
+// raises the matching toast so the toast stack stays single-sourced.
+function copyRecapImage(ok: boolean) {
+  pushToast(
+    ok ? 'Trophy card copied' : 'Could not copy image',
+    ok ? 'success' : 'info',
+  )
+}
+
 // Deliberate manual removal (roster X or the palette's Eliminate command), as
 // opposed to a spin elimination which goes through applySpinResult. Captures the
 // name before deleting so an undo toast can re-add it via the same addName path;
@@ -955,6 +965,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
       :survivor="activeParticipants[0] ?? null"
       @close="recapOpen = false"
       @copy="copyRecap"
+      @copy-image="copyRecapImage"
     />
   </Teleport>
 

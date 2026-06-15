@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildRecapSummary } from './recap'
+import { buildPodium, buildRecapSummary } from './recap'
 import type { Participant } from '../types'
 
 function part(name: string, spin_order?: number): Participant {
@@ -42,5 +42,28 @@ describe('buildRecapSummary', () => {
         '\n',
       ),
     )
+  })
+})
+
+describe('buildPodium', () => {
+  it('maps the first three picked names onto medal tiers in spin order', () => {
+    const picked = [part('Ada', 1), part('Alan', 2), part('Grace', 3), part('Linus', 4)]
+    expect(buildPodium(picked)).toEqual([
+      { tier: 'gold', rank: 1, name: 'Ada' },
+      { tier: 'silver', rank: 2, name: 'Alan' },
+      { tier: 'bronze', rank: 3, name: 'Grace' },
+    ])
+  })
+
+  it('returns fewer rows when fewer than three names were picked', () => {
+    expect(buildPodium([part('Ada', 1)])).toEqual([{ tier: 'gold', rank: 1, name: 'Ada' }])
+    expect(buildPodium([])).toEqual([])
+  })
+
+  it('falls back to the array index when spin_order is missing', () => {
+    expect(buildPodium([part('Ada'), part('Alan')])).toEqual([
+      { tier: 'gold', rank: 1, name: 'Ada' },
+      { tier: 'silver', rank: 2, name: 'Alan' },
+    ])
   })
 })
