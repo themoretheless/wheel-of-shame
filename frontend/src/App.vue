@@ -1,10 +1,24 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount, defineAsyncComponent } from 'vue'
-const WheelCanvas = defineAsyncComponent(() => import('./components/WheelCanvas.vue'))
+import WheelSkeleton from './components/WheelSkeleton.vue'
+const WheelCanvas = defineAsyncComponent({
+  loader: () => import('./components/WheelCanvas.vue'),
+  // Show the ring shimmer immediately so the wheel's slot is never blank while
+  // its three.js chunk downloads and the scene initializes.
+  loadingComponent: WheelSkeleton,
+  delay: 0,
+})
 import NameList from './components/NameList.vue'
 import SpinResultModal from './components/SpinResult.vue'
+import RecapReel from './components/RecapReel.vue'
 import CommandPalette, { type Command } from './components/CommandPalette.vue'
+import ShortcutsSheet from './components/ShortcutsSheet.vue'
+import ToastStack from './components/ToastStack.vue'
 import { useSession } from './composables/useSession'
+import { useToasts } from './composables/useToasts'
+import { identityColor } from './utils/identity'
+
+const { push: pushToast } = useToasts()
 
 const {
   session,
@@ -13,6 +27,7 @@ const {
   loading,
   error,
   remoteSpinResult,
+  recentSessions,
   wsConnected,
   create,
   load,
@@ -27,14 +42,112 @@ const {
 const titleInput = ref('')
 const spinning = ref(false)
 const winnerId = ref<string | null>(null)
-const wheelRef = ref<{ dismissWinner: () => void } | null>(null)
+const wheelRef = ref<{
+  dismissWinner: () => void
+  resetView: () => void
+  isMuted: { value: boolean }
+  toggleMute: () => void
+} | null>(null)
+// Template ref on the roster panel so a global "/" or "n" quick-capture key can
+// focus its name field without the user reaching for the mouse.
+const nameListRef = ref<{ focusInput: () => void } | null>(null)
 const winnerData = ref<{ id: string; name: string; remaining: number } | null>(null)
+// Curtain-call recap: when the final spin leaves a lone survivor, the recap reel
+// is queued here and shown once the winner lower-third is dismissed, so the two
+// overlays never stack. The flag is armed in onSpinComplete and consumed (then
+// shown) in dismissWinner.
+const recapQueued = ref(false)
+const recapOpen = ref(false)
+// True while the orbit camera has been dragged off its resting framing; drives
+// the Snap-home reset pill below the header.
+const cameraDrifted = ref(false)
+
+// Recents switcher: a dropdown next to the session title listing other sessions
+// this browser has visited (from localStorage via useSession), so a returning
+// visitor can hop back without keeping links around. Excludes the current
+// session; picking one loads it and updates the URL hash.
+const recentsOpen = ref(false)
+const otherRecents = computed(() =>
+  recentSessions.value.filter((r) => r.id !== session.value?.id),
+)
+function switchSession(id: string) {
+  recentsOpen.value = false
+  if (id === session.value?.id) return
+  window.location.hash = `#/${id}`
+  load(id)
+}
+function toggleRecents() {
+  recentsOpen.value = !recentsOpen.value
+}
+// Close the recents dropdown when a pointer lands outside the switcher.
+function onDocPointerDown(e: PointerEvent) {
+  if (!recentsOpen.value) return
+  const target = e.target as Element | null
+  if (target && !target.closest('.session-switcher')) {
+    recentsOpen.value = false
+  }
+}
+// Participant id whose wheel segment is currently under the pointer mid-spin;
+// NameList flashes the matching roster row in sync. Null when not spinning.
+const tickingId = ref<string | null>(null)
+// Participant id of the roster row the cursor is hovering (null when none).
+const hoverPeekId = ref<string | null>(null)
+// Roving keyboard focus: the participant walked to with Tab/Shift+Tab, lifting
+// its wheel segment without a mouse. Mouse hover takes priority so a real cursor
+// move overrides the keyboard ring.
+const focusedId = ref<string | null>(null)
+// Segment to lift as a peek, forwarded to WheelCanvas. Hover wins over keyboard
+// focus; both feed the same eased lift path on the canvas.
+const peekId = computed(() => hoverPeekId.value ?? focusedId.value)
+// Spoken label for the keyboard focus ring, mirrored into an aria-live region so
+// screen readers hear the focused name and its odds as Tab walks the roster.
+const focusAnnounce = computed(() => {
+  const id = focusedId.value
+  if (!id) return ''
+  const hit = activeParticipants.value.find((p) => p.id === id)
+  if (!hit) return ''
+  const odds = Math.round(100 / activeParticipants.value.length)
+  return `${hit.name}, ${odds}% chance`
+})
+// Identity color of the segment currently under the pointer, pulled through the
+// chrome as the --live-accent CSS var: the dock gains a thin accent bar and the
+// spin vignette's inner stop warms toward this hue, so the active name's color
+// bleeds into the UI in sync with the wheel. Falls back to the brand teal when
+// no segment is ticking (idle, or the id is no longer active).
+const DEFAULT_ACCENT = '#4ECDC4'
+const liveAccent = computed(() => {
+  const id = tickingId.value
+  if (!id) return DEFAULT_ACCENT
+  const hit = activeParticipants.value.find((p) => p.id === id)
+  return hit ? identityColor(hit.name) : DEFAULT_ACCENT
+})
+// Mirror of WheelCanvas's persisted spin-sound mute flag, seeded from the same
+// localStorage key so the dock button shows the right state before the canvas
+// mounts. The toggle below drives the canvas, which owns persistence.
+const soundMuted = ref(readMutedPref())
+function readMutedPref(): boolean {
+  try {
+    return localStorage.getItem('wheel-muted') === '1'
+  } catch {
+    return false
+  }
+}
+function toggleSound() {
+  wheelRef.value?.toggleMute()
+  soundMuted.value = wheelRef.value?.isMuted.value ?? !soundMuted.value
+}
 let isLocalSpin = false
 let pendingSpinResult: import('./types').SpinResult | null = null
 
 const flameCanvas = ref<HTMLCanvasElement | null>(null)
 let flameAnimId = 0
 let flameCleanup: (() => void) | null = null
+// Timestamp (performance.now ms) until which the title flame flares hotter:
+// set on a winner reveal so the header briefly surges brighter and larger in
+// sympathy with the result, then decays back to its idle blaze. Read inside
+// the flame loop; module-level so onWinnerReveal can poke it.
+let flareUntil = 0
+const FLARE_MS = 900
 
 interface Particle {
   x: number
@@ -44,6 +157,10 @@ interface Particle {
   life: number
   maxLife: number
   size: number
+  drift?: boolean
+  // Flare strength (0..1) captured at spawn time; biases this ember brighter
+  // and whiter so a winner-reveal surge reads hotter than the idle blaze.
+  flare?: number
 }
 
 // Scanning the full canvas with getImageData on every resize is expensive;
@@ -66,6 +183,9 @@ function getTextEdgePoints(w: number, h: number): [number, number][] {
 }
 
 function computeTextEdgePoints(w: number, h: number): [number, number][] {
+  // A 0-sized offscreen canvas makes getImageData throw IndexSizeError; bail to
+  // an empty set so a not-yet-laid-out header never crashes flame init.
+  if (w < 1 || h < 1) return []
   const off = document.createElement('canvas')
   off.width = w
   off.height = h
@@ -109,13 +229,33 @@ function initFlame() {
 
   const particles: Particle[] = []
   let edgePoints: [number, number][] = []
+  // The canvas extends EMBER_DRIFT px below the header so the rare drifting
+  // ember can fade out over the wheel region. The title text and its edge
+  // points stay anchored to the header band (the top headerH px), so this
+  // extra height never repositions the flame.
+  const EMBER_DRIFT = 280
+  let headerH = 0
 
+  let sizeRetry: number | undefined
   function resize() {
     const header = canvas.parentElement
     if (!header) return
+    headerH = header.clientHeight
     canvas.width = header.clientWidth
-    canvas.height = header.clientHeight
-    edgePoints = getTextEdgePoints(canvas.width, canvas.height)
+    canvas.height = headerH + EMBER_DRIFT
+    // Display the canvas buffer 1:1 so the flame isn't stretched: width fills
+    // the header (== buffer width), height matches the buffer's drift-extended
+    // height and spills below the header band.
+    canvas.style.height = `${canvas.height}px`
+    // On a cold load the header may not be laid out yet (clientWidth 0). Sampling
+    // text edges from a 0-width canvas throws, so skip it and retry next frame
+    // until the header has a real size; the flame simply waits to ignite.
+    if (canvas.width < 1 || headerH < 1) {
+      sizeRetry = requestAnimationFrame(resize)
+      return
+    }
+    sizeRetry = undefined
+    edgePoints = getTextEdgePoints(canvas.width, headerH)
   }
   resize()
 
@@ -130,20 +270,45 @@ function initFlame() {
   flameCleanup = () => {
     window.removeEventListener('resize', onResize)
     clearTimeout(resizeTimer)
+    if (sizeRetry !== undefined) cancelAnimationFrame(sizeRetry)
+  }
+
+  // Reduced motion: thin the flame to a low flicker rather than a full blaze.
+  const reducedMotion = typeof window.matchMedia === 'function'
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  const spawnPerFrame = reducedMotion ? 1 : 4
+
+  // 0 at rest, ramping to 1 right after a reveal and easing back to 0 across
+  // FLARE_MS. Reduced motion stays calm, so the flare never kicks in there.
+  function flareStrength(): number {
+    if (reducedMotion) return 0
+    const remain = flareUntil - performance.now()
+    if (remain <= 0) return 0
+    return Math.min(1, remain / FLARE_MS)
   }
 
   function spawn() {
     if (edgePoints.length === 0) return
-    for (let i = 0; i < 4; i++) {
+    // During a flare, throw off up to ~2.5x the embers and start them larger.
+    const flare = flareStrength()
+    const count = Math.round(spawnPerFrame * (1 + flare * 1.5))
+    for (let i = 0; i < count; i++) {
       const pt = edgePoints[Math.floor(Math.random() * edgePoints.length)]
+      // ~2% of embers break loose and drift down past the header into the
+      // wheel region: a gentle downward drift and a much longer life so they
+      // survive the fall before fading. Reduced motion keeps the flame calm,
+      // so no drifters there.
+      const drifter = !reducedMotion && Math.random() < 0.02
       particles.push({
         x: pt[0],
         y: pt[1],
         vx: (Math.random() - 0.5) * 0.6,
-        vy: -(0.8 + Math.random() * 1.8),
+        vy: drifter ? 0.3 + Math.random() * 0.5 : -(0.8 + Math.random() * 1.8),
         life: 0,
-        maxLife: 20 + Math.random() * 30,
-        size: 4 + Math.random() * 10,
+        maxLife: drifter ? 160 + Math.random() * 80 : 20 + Math.random() * 30,
+        size: (4 + Math.random() * 10) * (1 + flare * 0.6),
+        drift: drifter,
+        flare,
       })
     }
   }
@@ -157,9 +322,17 @@ function initFlame() {
       p.life++
       p.x += p.vx + (Math.random() - 0.5) * 0.4
       p.y += p.vy
-      p.vy *= 0.97
+      if (p.drift) {
+        // Drifters keep falling: a touch of downward pull (capped) instead of
+        // the rising flame's drag, and a far gentler shrink so they reach the
+        // wheel before winking out.
+        p.vy = Math.min(p.vy + 0.012, 1.0)
+        p.size *= 0.995
+      } else {
+        p.vy *= 0.97
+        p.size *= 0.98
+      }
       p.vx += (Math.random() - 0.5) * 0.1
-      p.size *= 0.98
 
       if (p.life >= p.maxLife || p.size < 0.5) {
         particles.splice(i, 1)
@@ -183,8 +356,16 @@ function initFlame() {
         r = 135 - st * 80; g = st * 20; b = st * 20
       }
 
+      // Flare bias: pull the cooler channels up toward white-hot so a reveal
+      // surge glows brighter, scaled by the strength captured at spawn time.
+      const f = p.flare ?? 0
+      if (f > 0) {
+        g += (255 - g) * 0.6 * f
+        b += (200 - b) * 0.6 * f
+      }
+
       ctx.save()
-      ctx.globalAlpha = alpha * 0.8
+      ctx.globalAlpha = Math.min(1, alpha * (0.8 + 0.25 * f))
       ctx.translate(p.x, p.y)
 
       const s = p.size
@@ -218,12 +399,14 @@ onMounted(() => {
   }
   initFlame()
   window.addEventListener('keydown', onGlobalKeydown)
+  window.addEventListener('pointerdown', onDocPointerDown)
 })
 
 onBeforeUnmount(() => {
   cancelAnimationFrame(flameAnimId)
   flameCleanup?.()
   window.removeEventListener('keydown', onGlobalKeydown)
+  window.removeEventListener('pointerdown', onDocPointerDown)
 })
 
 // A SpinResult from another client: drive the wheel to that winner with the
@@ -249,6 +432,24 @@ watch(remoteSpinResult, (result) => {
   spinning.value = true
 })
 
+// A reset (or switching sessions) clears the picked list; tear down any pending
+// or open recap so a fresh game never inherits a stale curtain call.
+watch(removedParticipants, (removed) => {
+  if (removed.length === 0) {
+    recapQueued.value = false
+    recapOpen.value = false
+  }
+})
+
+// Drop the keyboard focus ring if the focused name leaves the wheel (picked by a
+// spin, removed by hand, or cleared on reset) so the ring never points at a
+// stale segment.
+watch(activeParticipants, (list) => {
+  if (focusedId.value && !list.some((p) => p.id === focusedId.value)) {
+    focusedId.value = null
+  }
+})
+
 async function createSession() {
   const title = titleInput.value.trim()
   if (!title) return
@@ -270,15 +471,44 @@ async function handleSpin() {
   pendingSpinResult = result
   winnerId.value = result.picked.id
   spinning.value = true
+  // The spin owns the wheel now, so retire the keyboard focus ring.
+  focusedId.value = null
 }
 
 function onWinnerReveal(data: { id: string; name: string; remaining: number }) {
   winnerData.value = data
+  // Kick the title flame into a brief hotter flare in sympathy with the reveal.
+  flareUntil = performance.now() + FLARE_MS
+}
+
+function onCameraDrifted(drifted: boolean) {
+  cameraDrifted.value = drifted
+}
+
+function onTickSegment(participantId: string | null) {
+  tickingId.value = participantId
+}
+
+function onHoverName(id: string | null) {
+  hoverPeekId.value = id
+  // A real hover supersedes the keyboard ring, so Tab focus doesn't linger on a
+  // different segment than the one the cursor is over.
+  if (id) focusedId.value = null
+}
+
+function resetView() {
+  wheelRef.value?.resetView()
 }
 
 function dismissWinner() {
   winnerData.value = null
   wheelRef.value?.dismissWinner()
+  // If that was the final elimination, roll the curtain-call recap now that the
+  // winner card is out of the way.
+  if (recapQueued.value) {
+    recapQueued.value = false
+    recapOpen.value = true
+  }
 }
 
 function onSpinComplete(_participantId: string) {
@@ -290,22 +520,69 @@ function onSpinComplete(_participantId: string) {
   winnerId.value = null
   isLocalSpin = false
   remoteSpinResult.value = null
+  // Game over: one name left on the wheel and at least one already picked. Arm
+  // the recap so it plays when the winner lower-third is dismissed.
+  if (activeParticipants.value.length <= 1 && removedParticipants.value.length > 0) {
+    recapQueued.value = true
+  }
 }
 
 function copyLink() {
   if (!session.value) return
   const url = `${window.location.origin}${window.location.pathname}#/${session.value.id}`
-  navigator.clipboard.writeText(url)
+  navigator.clipboard.writeText(url).then(
+    () => pushToast('Share link copied', 'success'),
+    () => pushToast('Could not copy link', 'info'),
+  )
+}
+
+// Copy the recap reel's plain-text run summary, reusing copyLink's clipboard +
+// toast flow. RecapReel assembles the text and hands it up so App.vue keeps the
+// single source of toasts.
+function copyRecap(summary: string) {
+  navigator.clipboard.writeText(summary).then(
+    () => pushToast('Run summary copied', 'success'),
+    () => pushToast('Could not copy summary', 'info'),
+  )
+}
+
+// Result of the recap reel's one-tap trophy-image export. RecapReel owns the
+// canvas draw and clipboard write (it needs the live DOM canvas); App.vue only
+// raises the matching toast so the toast stack stays single-sourced.
+function copyRecapImage(ok: boolean) {
+  pushToast(
+    ok ? 'Trophy card copied' : 'Could not copy image',
+    ok ? 'success' : 'info',
+  )
+}
+
+// Deliberate manual removal (roster X or the palette's Eliminate command), as
+// opposed to a spin elimination which goes through applySpinResult. Captures the
+// name before deleting so an undo toast can re-add it via the same addName path;
+// the reverse action no-ops gracefully if the toast TTL lapses untaken. Spin
+// eliminations are untouched and never get an undo.
+function handleRemove(id: string) {
+  const name = activeParticipants.value.find((p) => p.id === id)?.name
+  removeName(id)
+  if (!name) return
+  pushToast(`Removed ${name}`, 'info', identityColor(name), false, {
+    label: 'Undo',
+    run: () => addName(name),
+  })
 }
 
 // --- Command palette (Cmd-K / Ctrl-K) ---
 const paletteOpen = ref(false)
+
+// Keyboard cheat-sheet toggled with '?'. Its rows mirror onGlobalKeydown below.
+const shortcutsOpen = ref(false)
 
 const paletteCommands = computed<Command[]>(() => [
   {
     id: 'spin',
     label: 'Spin the wheel',
     hint: 'Spin',
+    group: 'Actions',
     disabled: spinning.value || activeParticipants.value.length === 0,
     run: () => {
       handleSpin()
@@ -315,16 +592,24 @@ const paletteCommands = computed<Command[]>(() => [
     id: 'add',
     label: 'Add a name',
     hint: 'New participant',
+    group: 'Actions',
     disabled: !session.value,
-    run: () => {
-      const name = window.prompt('Name to add')?.trim()
-      if (name) addName(name)
+    // Opens an inline glass field in the palette rather than a native prompt;
+    // returning false keeps it open so several names can be added in a row.
+    run: () => {},
+    inline: {
+      placeholder: 'Name to add...',
+      submit: (name) => {
+        addName(name)
+        return false
+      },
     },
   },
   {
     id: 'reset',
     label: 'Reset the wheel',
     hint: 'Restore everyone',
+    group: 'Actions',
     disabled: !session.value || removedParticipants.value.length === 0,
     run: () => {
       reset()
@@ -334,9 +619,19 @@ const paletteCommands = computed<Command[]>(() => [
     id: 'copy-link',
     label: 'Copy share link',
     hint: 'Share',
+    group: 'Actions',
     disabled: !session.value,
     run: () => {
       copyLink()
+    },
+  },
+  {
+    id: 'toggle-sound',
+    label: soundMuted.value ? 'Unmute spin sound' : 'Mute spin sound',
+    hint: soundMuted.value ? 'Unmute' : 'Mute',
+    group: 'Actions',
+    run: () => {
+      toggleSound()
     },
   },
   // One spotlight command per active participant: type a name into Cmd-K and
@@ -348,8 +643,9 @@ const paletteCommands = computed<Command[]>(() => [
       label: `Eliminate ${p.name}`,
       subtitle: `${odds}% to be picked next`,
       hint: 'Remove',
+      group: 'Eliminate',
       run: () => {
-        removeName(p.id)
+        handleRemove(p.id)
       },
     }
   }),
@@ -365,6 +661,27 @@ function isEditableTarget(target: EventTarget | null): boolean {
   return tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable
 }
 
+// Roving focus ring: step the keyboard-lifted segment to the next/previous
+// active name, wrapping at the ends. A fresh walk (nothing focused yet) starts
+// at the first name forward / last name backward. Clears the mouse peek so the
+// ring is the sole highlight while the keyboard drives it.
+function cycleFocus(dir: 1 | -1) {
+  const list = activeParticipants.value
+  if (list.length === 0) {
+    focusedId.value = null
+    return
+  }
+  hoverPeekId.value = null
+  const current = list.findIndex((p) => p.id === focusedId.value)
+  let next: number
+  if (current === -1) {
+    next = dir === 1 ? 0 : list.length - 1
+  } else {
+    next = (current + dir + list.length) % list.length
+  }
+  focusedId.value = list[next].id
+}
+
 function onGlobalKeydown(e: KeyboardEvent) {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
     e.preventDefault()
@@ -374,10 +691,63 @@ function onGlobalKeydown(e: KeyboardEvent) {
   // The command palette owns the keyboard while it's open (Escape closes it).
   if (paletteOpen.value) return
 
-  if (e.code === 'Space' && !isEditableTarget(e.target)) {
+  // Escape closes the recents switcher first if it's open, so the key doesn't
+  // also dismiss the winner modal underneath.
+  if (recentsOpen.value && e.key === 'Escape') {
     e.preventDefault()
-    // Don't spin underneath the winner modal: Space is inert until dismissed.
-    if (!winnerData.value) handleSpin()
+    recentsOpen.value = false
+    return
+  }
+
+  // The cheat-sheet captures Escape to close itself; everything else is inert
+  // beneath it, so handle that case before the shortcuts it documents.
+  if (shortcutsOpen.value) {
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      shortcutsOpen.value = false
+    }
+    return
+  }
+
+  if (e.key === '?' && !isEditableTarget(e.target)) {
+    e.preventDefault()
+    shortcutsOpen.value = true
+  } else if (
+    (e.key === '/' || e.key === 'n') &&
+    !e.metaKey &&
+    !e.ctrlKey &&
+    !e.altKey &&
+    !isEditableTarget(e.target)
+  ) {
+    // Quick-capture: jump straight to the roster's name field. Guarded against
+    // modifiers so Cmd/Ctrl+N (new window) and friends still reach the browser.
+    // No-ops on the create screen, where the roster panel isn't mounted yet.
+    e.preventDefault()
+    nameListRef.value?.focusInput()
+  } else if (
+    e.key === 'Tab' &&
+    !e.metaKey &&
+    !e.ctrlKey &&
+    !e.altKey &&
+    !isEditableTarget(e.target) &&
+    !winnerData.value &&
+    !recapOpen.value &&
+    !spinning.value &&
+    activeParticipants.value.length > 0
+  ) {
+    // Roving focus ring: Tab walks the wheel forward, Shift+Tab backward,
+    // lifting each segment in turn so the roster can be explored without a mouse.
+    // Held back while a spin/overlay owns the wheel.
+    e.preventDefault()
+    cycleFocus(e.shiftKey ? -1 : 1)
+  } else if (e.code === 'Space' && !isEditableTarget(e.target)) {
+    e.preventDefault()
+    // Don't spin underneath the winner modal or the recap reel: Space is inert
+    // until whichever overlay is up has been dismissed.
+    if (!winnerData.value && !recapOpen.value) handleSpin()
+  } else if (e.key === 'Escape' && recapOpen.value) {
+    e.preventDefault()
+    recapOpen.value = false
   } else if (e.key === 'Escape' && winnerData.value) {
     e.preventDefault()
     dismissWinner()
@@ -392,19 +762,49 @@ function onGlobalKeydown(e: KeyboardEvent) {
     :participants="activeParticipants"
     :spinning="spinning"
     :winner-id="winnerId"
+    :peek-id="peekId"
     @spin-complete="onSpinComplete"
     @spin-click="handleSpin"
     @winner-reveal="onWinnerReveal"
+    @camera-drifted="onCameraDrifted"
+    @tick-segment="onTickSegment"
   />
 
   <!-- UI overlay -->
-  <div class="overlay">
+  <div
+    class="overlay"
+    :class="{ spinning, 'palette-dimmed': paletteOpen }"
+    :style="{ '--live-accent': liveAccent }"
+  >
     <header class="fire-header">
       <canvas ref="flameCanvas" class="flame-canvas"></canvas>
       <h1 class="fire-title">
         <span class="fire-text" data-text="Wheel of Shame">Wheel of Shame</span>
       </h1>
     </header>
+
+    <!-- Roving focus ring announcer: as Tab walks the wheel, the focused name
+         and its odds are spoken here for screen readers. -->
+    <span class="visually-hidden" aria-live="polite">{{ focusAnnounce }}</span>
+
+    <!-- Snap-home pill: appears when the orbit camera is dragged off its
+         resting framing, restoring the default view on click. -->
+    <Transition name="reset-pill">
+      <button
+        v-if="cameraDrifted"
+        @click="resetView"
+        class="btn btn-small reset-pill"
+        title="Reset camera view"
+      >
+        <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true">
+          <path
+            d="M12 5V2L8 6l4 4V7a5 5 0 1 1-5 5H5a7 7 0 1 0 7-7z"
+            fill="currentColor"
+          />
+        </svg>
+        Reset view
+      </button>
+    </Transition>
 
     <div v-if="loading" class="loading">Loading...</div>
     <div v-if="error" class="error">{{ error }}</div>
@@ -426,13 +826,112 @@ function onGlobalKeydown(e: KeyboardEvent) {
     <!-- Session screen -->
     <div v-if="session" class="session-screen">
       <div class="session-header">
+        <!-- Session title doubles as a recents switcher: when this browser has
+             visited other sessions, a chevron reveals a dropdown to hop back. -->
+        <div class="session-switcher">
+          <h2 class="session-title" :title="session.title">{{ session.title }}</h2>
+          <button
+            v-if="otherRecents.length > 0"
+            class="btn btn-small switcher-toggle"
+            :class="{ open: recentsOpen }"
+            :aria-expanded="recentsOpen"
+            aria-haspopup="listbox"
+            title="Switch session"
+            @click.stop="toggleRecents"
+          >
+            <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true">
+              <path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </button>
+          <Transition name="recents-menu">
+            <ul
+              v-if="recentsOpen && otherRecents.length > 0"
+              class="recents-menu"
+              role="listbox"
+            >
+              <li v-for="r in otherRecents" :key="r.id" role="option">
+                <button class="recents-item" @click="switchSession(r.id)">
+                  <span class="recents-title">{{ r.title }}</span>
+                </button>
+              </li>
+            </ul>
+          </Transition>
+        </div>
         <div class="session-actions">
           <span class="ws-status" :class="{ connected: wsConnected }">
             {{ wsConnected ? 'Live' : 'Offline' }}
           </span>
           <span class="kbd-hint" title="Press Space to spin"><kbd>Space</kbd> to spin</span>
-          <button @click="copyLink" class="btn btn-small" title="Copy link">Share</button>
+          <button
+            class="kbd-hint-btn"
+            title="Keyboard shortcuts"
+            aria-label="Keyboard shortcuts"
+            @click="shortcutsOpen = true"
+          >
+            <kbd>?</kbd>
+          </button>
         </div>
+      </div>
+
+      <!-- Floating action dock: the primary controls (spin, share, command
+           palette) collected into one glass bar centered over the wheel
+           column, offset for the 340px right-side panel. -->
+      <div class="action-dock">
+        <button
+          @click="handleSpin"
+          class="btn btn-small dock-spin"
+          :disabled="spinning || activeParticipants.length === 0"
+          title="Spin the wheel"
+        >
+          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+            <path
+              d="M12 4V1L8 5l4 4V6a6 6 0 1 1-6 6H4a8 8 0 1 0 8-8z"
+              fill="currentColor"
+            />
+          </svg>
+          Spin
+        </button>
+        <button @click="copyLink" class="btn btn-small" title="Copy share link">
+          Share
+        </button>
+        <button
+          @click="toggleSound"
+          class="btn btn-small dock-mute"
+          :title="soundMuted ? 'Unmute spin sound' : 'Mute spin sound'"
+          :aria-pressed="soundMuted"
+        >
+          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+            <path
+              d="M3 9v6h4l5 5V4L7 9H3z"
+              fill="currentColor"
+            />
+            <template v-if="soundMuted">
+              <path
+                d="M16 9l6 6M22 9l-6 6"
+                stroke="currentColor"
+                stroke-width="2"
+                fill="none"
+                stroke-linecap="round"
+              />
+            </template>
+            <template v-else>
+              <path
+                d="M16 8.5a5 5 0 0 1 0 7"
+                stroke="currentColor"
+                stroke-width="2"
+                fill="none"
+                stroke-linecap="round"
+              />
+            </template>
+          </svg>
+        </button>
+        <button
+          @click="paletteOpen = true"
+          class="btn btn-small"
+          title="Open command palette"
+        >
+          <kbd class="dock-kbd">⌘K</kbd>
+        </button>
       </div>
 
       <div class="main-layout">
@@ -444,11 +943,14 @@ function onGlobalKeydown(e: KeyboardEvent) {
         <div class="list-section">
           <div class="panel">
             <NameList
+              ref="nameListRef"
               :active="activeParticipants"
               :removed="removedParticipants"
+              :ticking-id="tickingId"
               @add="addName"
               @add-batch="addNames"
-              @remove="removeName"
+              @remove="handleRemove"
+              @hover-name="onHoverName"
             @reset="reset"
             />
           </div>
@@ -463,7 +965,20 @@ function onGlobalKeydown(e: KeyboardEvent) {
       v-if="winnerData"
       :name="winnerData.name"
       :remaining="winnerData.remaining"
+      :color="identityColor(winnerData.name)"
       @close="dismissWinner"
+    />
+  </Teleport>
+
+  <Teleport to="body">
+    <RecapReel
+      v-if="recapOpen"
+      :title="session?.title ?? ''"
+      :picked="removedParticipants"
+      :survivor="activeParticipants[0] ?? null"
+      @close="recapOpen = false"
+      @copy="copyRecap"
+      @copy-image="copyRecapImage"
     />
   </Teleport>
 
@@ -472,15 +987,118 @@ function onGlobalKeydown(e: KeyboardEvent) {
     :commands="paletteCommands"
     @close="paletteOpen = false"
   />
+
+  <ShortcutsSheet :open="shortcutsOpen" @close="shortcutsOpen = false" />
+
+  <Teleport to="body">
+    <ToastStack />
+  </Teleport>
 </template>
 
 <style scoped>
+/* Off-screen but readable by assistive tech: drives the roving-focus aria-live
+   announcer without taking up layout or catching the eye. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
 .overlay {
   position: relative;
   z-index: 1;
   min-height: 100vh;
   padding: 20px;
   pointer-events: none;
+  /* Drives the pre-spin focus vignette: the scrim and roster/dock dimming all
+     ramp off this single value, lerped 0 -> 1 while the wheel is spinning so
+     the chrome recedes and the wheel reads as the subject (keynote-style). */
+  --spin-focus: 0;
+  /* Identity color of the segment under the pointer mid-spin (set inline from
+     liveAccent); the dock accent bar and vignette inner stop sample it. Eases
+     between hues as the pointer crosses segments so the tint glides. */
+  --live-accent: #4ECDC4;
+  transition:
+    --spin-focus 0.45s ease,
+    --live-accent 0.25s ease;
+}
+
+.overlay.spinning {
+  --spin-focus: 1;
+}
+
+/* Cmd-K backdrop ramp: while the command palette is open, the app chrome behind
+   it (the title header and the roster panel) softly blurs and dims, so the
+   palette reads as a focused layer floating above a recessed backdrop
+   (Raycast-style). The palette's own teleported overlay paints on top; this is
+   the underneath content easing back, visible at the palette's translucent
+   edges and through its open/close transition. The wheel itself stays crisp
+   (it's the background canvas, already darkened by the palette scrim), and we
+   target .list-section rather than the .main-layout flex parent so the filter
+   never turns that parent into a containing block for the fixed roster. */
+.palette-dimmed .fire-header,
+.palette-dimmed .list-section {
+  filter: blur(3px) brightness(0.7);
+}
+
+/* Register the custom property so it can be animated; without an @property
+   declaration browsers treat it as a discrete string and the transition snaps.
+   The class toggle still works as a fallback where @property is unsupported. */
+@property --spin-focus {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 0;
+}
+
+/* Register --live-accent as a color so it interpolates between hues; without
+   this browsers treat it as a discrete string and the tint snaps between
+   segments. The inline value on .overlay still applies as a fallback. */
+@property --live-accent {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #4ECDC4;
+}
+
+/* Frosted scrim: a fixed darkening layer that sits above the 3D wheel
+   (z-index 0) but behind the overlay content. As a z-index:-1 child of the
+   overlay's own stacking context it paints behind the panels yet above the
+   canvas, deepening contrast under the right-side roster and bottom dock the
+   way a keynote vignette pushes the subject forward. pointer-events:none lets
+   wheel drags pass straight through. */
+.overlay::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    /* Pre-spin focus layer: a center-weighted vignette that fades up only while
+       spinning (alpha keyed to --spin-focus), pulling edge contrast down so the
+       wheel pops. Sits first so the resting scrims below still read normally.
+       The inner stop is warmed toward --live-accent (the ticking segment's hue)
+       so the wheel's center subtly glows in the active name's color mid-spin;
+       the tint is itself scaled by --spin-focus so it only shows while spinning. */
+    radial-gradient(
+      ellipse 75% 75% at center,
+      color-mix(in srgb, var(--live-accent) calc(10% * var(--spin-focus)), transparent) 38%,
+      rgba(0, 0, 0, calc(0.5 * var(--spin-focus))) 100%
+    ),
+    radial-gradient(
+      ellipse at right,
+      rgba(0, 0, 0, 0.45),
+      transparent 60%
+    ),
+    linear-gradient(
+      to top,
+      rgba(0, 0, 0, 0.4),
+      transparent 28%
+    );
 }
 
 /* All interactive elements get pointer-events back */
@@ -502,15 +1120,23 @@ function onGlobalKeydown(e: KeyboardEvent) {
   position: relative;
   height: 80px;
   padding-right: 340px;
+  transition: filter 0.18s ease;
 }
 
 .flame-canvas {
   position: absolute;
-  inset: 0;
+  top: 0;
+  left: 0;
+  right: 0;
+  /* Spills below the header band so the rare drifting ember can fall over the
+     wheel; the script sets an explicit pixel height (header + drift) so the
+     buffer renders 1:1. Pointer events stay off, so nothing below the header
+     is blocked. z-index:-1 keeps it behind the overlay's panels and title (and
+     above the scrim/wheel), so a drifting ember reads as ambient depth rather
+     than overlapping the session UI. */
   width: 100%;
-  height: 100%;
   pointer-events: none;
-  z-index: 0;
+  z-index: -1;
 }
 
 .fire-title {
@@ -624,6 +1250,124 @@ function onGlobalKeydown(e: KeyboardEvent) {
   background: rgba(255, 255, 255, 0.2);
 }
 
+/* Floating snap-home pill, centered over the wheel below the header. */
+.reset-pill {
+  position: fixed;
+  top: 92px;
+  left: calc((100% - 340px) / 2);
+  transform: translateX(-50%);
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 16px;
+  background: rgba(30, 30, 30, 0.78);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+}
+
+.reset-pill svg {
+  flex: 0 0 auto;
+}
+
+.reset-pill-enter-active,
+.reset-pill-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.reset-pill-enter-from,
+.reset-pill-leave-to {
+  opacity: 0;
+  transform: translate(-50%, -8px);
+}
+
+@media (max-width: 700px) {
+  .reset-pill {
+    left: 50%;
+  }
+}
+
+/* Floating action dock, anchored to the bottom of the wheel column. Shares the
+   glass pill styling with .reset-pill and the same 340px panel-offset centering
+   so it sits over the wheel rather than the screen center. */
+.action-dock {
+  position: fixed;
+  bottom: 28px;
+  left: calc((100% - 340px) / 2);
+  transform: translateX(-50%);
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-radius: 18px;
+  background: rgba(30, 30, 30, 0.78);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+  transition: opacity 0.45s ease, filter 0.45s ease;
+}
+
+/* Live accent bar: a 2px gradient hairline along the top of the dock, tinted to
+   the ticking segment's identity color via --live-accent. Its opacity is keyed
+   to --spin-focus so it only lights up mid-spin (when a name is under the
+   pointer) and stays invisible at rest. */
+.action-dock::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--live-accent),
+    transparent
+  );
+  opacity: var(--spin-focus);
+  transition: opacity 0.45s ease;
+}
+
+.action-dock .btn-small {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 12px;
+}
+
+.action-dock .btn-small:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.action-dock .btn-small:disabled:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.dock-spin {
+  color: #4ECDC4;
+  font-weight: bold;
+}
+
+/* Muted state dims the speaker glyph so the slash reads as "off" at a glance. */
+.dock-mute[aria-pressed='true'] {
+  color: rgba(223, 230, 233, 0.5);
+}
+
+.dock-kbd {
+  font-size: 11px;
+  font-family: inherit;
+  color: rgba(223, 230, 233, 0.85);
+}
+
+@media (max-width: 700px) {
+  .action-dock {
+    left: 50%;
+    bottom: calc(50vh + 12px);
+  }
+}
+
 .btn-warning {
   color: #FFEAA7;
 }
@@ -649,6 +1393,21 @@ function onGlobalKeydown(e: KeyboardEvent) {
   color: rgba(223, 230, 233, 0.6);
 }
 
+/* The '?' chip reuses the kbd look but is a real button so the cheat sheet is
+   reachable by mouse, not just the keyboard it documents. */
+.kbd-hint-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.kbd-hint-btn:hover kbd {
+  background: rgba(255, 255, 255, 0.18);
+}
+
 @media (max-width: 700px) {
   .kbd-hint {
     display: none;
@@ -659,19 +1418,121 @@ function onGlobalKeydown(e: KeyboardEvent) {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 16px;
   margin-bottom: 24px;
 }
 
-.session-header h2 {
+/* Switcher wrapper: holds the title and its dropdown trigger, and anchors the
+   absolutely-positioned recents menu below the header. */
+.session-switcher {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.session-title {
   margin: 0;
+  min-width: 0;
+  font-size: 20px;
+  font-weight: 600;
   color: #dfe6e9;
   text-shadow: 0 1px 10px rgba(0,0,0,0.5);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Chevron toggle: a small glass chip reusing .btn-small, revealing the recents
+   list. Rotates its caret when the menu is open. */
+.switcher-toggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 7px;
+  border-radius: 8px;
+}
+
+.switcher-toggle svg {
+  transition: transform 0.18s ease;
+}
+
+.switcher-toggle.open svg {
+  transform: rotate(180deg);
+}
+
+/* Recents dropdown: a glass panel matching .reset-pill, listing other sessions
+   this browser has visited so the user can hop back without a link. */
+.recents-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 20;
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  min-width: 200px;
+  max-width: 280px;
+  max-height: 50vh;
+  overflow-y: auto;
+  border-radius: 12px;
+  background: rgba(30, 30, 30, 0.92);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+
+.recents-item {
+  display: flex;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: #dfe6e9;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.recents-item:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.recents-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recents-menu-enter-active,
+.recents-menu-leave-active {
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.recents-menu-enter-from,
+.recents-menu-leave-to {
+  opacity: 0;
+  transform: translateY(-6px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .switcher-toggle svg,
+  .recents-menu-enter-active,
+  .recents-menu-leave-active {
+    transition: none;
+  }
 }
 
 .session-actions {
   display: flex;
   gap: 8px;
   align-items: center;
+  flex-shrink: 0;
 }
 
 .main-layout {
@@ -698,6 +1559,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
   width: 320px;
   max-height: calc(100vh - 100px);
   overflow-y: auto;
+  transition: filter 0.18s ease;
 }
 
 .panel {
@@ -706,6 +1568,15 @@ function onGlobalKeydown(e: KeyboardEvent) {
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 16px;
   padding: 20px;
+  transition: opacity 0.45s ease, filter 0.45s ease;
+}
+
+/* While spinning, the roster and dock recede so attention stays on the wheel.
+   They keep pointer-events so a mid-spin edit still works, just visually muted. */
+.overlay.spinning .panel,
+.overlay.spinning .action-dock {
+  opacity: 0.55;
+  filter: saturate(0.7) brightness(0.85);
 }
 
 
@@ -728,6 +1599,18 @@ function onGlobalKeydown(e: KeyboardEvent) {
   .wheel-section {
     min-height: 40vh;
     margin-right: 0;
+  }
+}
+
+/* Honor reduced-motion: keep the focus dim as a static state but drop the
+   ramp so it snaps instead of animating. */
+@media (prefers-reduced-motion: reduce) {
+  .overlay,
+  .overlay .panel,
+  .overlay .action-dock,
+  .fire-header,
+  .list-section {
+    transition: none;
   }
 }
 </style>

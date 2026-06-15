@@ -2,12 +2,69 @@ import { ref, computed } from 'vue'
 import type { Session, Participant, SpinResult } from '../types'
 import * as api from '../api/client'
 import { useWebSocket } from './useWebSocket'
+import { useToasts } from './useToasts'
+import { identityColor } from '../utils/identity'
+
+const { push: pushToast, update: updateToast, dismiss: dismissToast } = useToasts()
 
 const session = ref<Session | null>(null)
 const participants = ref<Participant[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
 const lastSpinResult = ref<SpinResult | null>(null)
+
+// --- Pinned recents (frecency-lite) ---
+//
+// Every session successfully loaded or created is remembered in localStorage as
+// {id, title, lastUsed}, deduped by id and capped, so a returning visitor can
+// hop back to a recent room without keeping its link around. The list is sorted
+// most-recent-first and surfaced through `recentSessions` for the App.vue
+// switcher chip. Storage failures (private mode, quota) are swallowed: recents
+// are a convenience, never load-bearing.
+export interface RecentSession {
+  id: string
+  title: string
+  lastUsed: number
+}
+
+const RECENTS_KEY = 'wheel-recent-sessions'
+const RECENTS_CAP = 8
+
+const recentSessions = ref<RecentSession[]>(readRecents())
+
+function readRecents(): RecentSession[] {
+  try {
+    const raw = localStorage.getItem(RECENTS_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed
+      .filter(
+        (r): r is RecentSession =>
+          r != null &&
+          typeof r.id === 'string' &&
+          typeof r.title === 'string' &&
+          typeof r.lastUsed === 'number',
+      )
+      .sort((a, b) => b.lastUsed - a.lastUsed)
+      .slice(0, RECENTS_CAP)
+  } catch {
+    return []
+  }
+}
+
+function rememberSession(s: Session) {
+  const next: RecentSession[] = [
+    { id: s.id, title: s.title, lastUsed: Date.now() },
+    ...recentSessions.value.filter((r) => r.id !== s.id),
+  ].slice(0, RECENTS_CAP)
+  recentSessions.value = next
+  try {
+    localStorage.setItem(RECENTS_KEY, JSON.stringify(next))
+  } catch {
+    // Persisting recents is best-effort; ignore storage failures.
+  }
+}
 
 // Remote spin events (from other clients)
 const remoteSpinResult = ref<SpinResult | null>(null)
@@ -33,6 +90,34 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 // Bumped whenever a new connection is established intentionally (load/create)
 // or the session is torn down, invalidating any in-flight reconnect loop.
 let reconnectGen = 0
+// Handle to the sticky "reconnecting…" toast, raised on the first drop and
+// resolved (or dropped) once the socket comes back or we give up. Null when no
+// outage is being surfaced, which also gates the "Reconnected" success toast so
+// the very first connect on load never reports a reconnection.
+let reconnectToastId: number | null = null
+
+// Raise the sticky reconnect pill on the first drop of an outage; later attempts
+// reuse the same toast so a long outage doesn't stack a new pill each backoff.
+function showReconnectingToast() {
+  if (reconnectToastId !== null) return
+  reconnectToastId = pushToast('Connection lost, reconnecting…', 'warn', undefined, true)
+}
+
+// Flip the sticky reconnect pill to a timed success toast once the socket is
+// back. No-op if no outage was being surfaced (e.g. the initial connect).
+function resolveReconnectToast() {
+  if (reconnectToastId === null) return
+  updateToast(reconnectToastId, { message: 'Reconnected', kind: 'success', sticky: false })
+  reconnectToastId = null
+}
+
+// Tear the sticky reconnect pill down without a success note, e.g. when the
+// session is abandoned or the server is gone for good.
+function clearReconnectToast() {
+  if (reconnectToastId === null) return
+  dismissToast(reconnectToastId)
+  reconnectToastId = null
+}
 
 function cancelReconnect() {
   reconnectGen++
@@ -41,10 +126,15 @@ function cancelReconnect() {
     clearTimeout(reconnectTimer)
     reconnectTimer = null
   }
+  // An intentional reconnect (load/create/teardown) ends any outage we were
+  // surfacing, so retire the sticky pill rather than leaving it stuck.
+  clearReconnectToast()
 }
 
 function scheduleReconnect() {
   if (!session.value || reconnectTimer) return
+  // Surface the outage on the very first scheduled retry; reused for the rest.
+  showReconnectingToast()
   const gen = reconnectGen
   const backoff = Math.min(
     RECONNECT_BASE_MS * 2 ** reconnectAttempt,
@@ -97,6 +187,9 @@ ws.onOpen(() => {
   // A real open is the only success signal that clears the backoff, so the
   // next unexpected drop starts the delay sequence over from the base.
   reconnectAttempt = 0
+  // If an outage was being surfaced, flip its sticky pill to a "Reconnected"
+  // note; on the initial connect there is no pill, so this is a no-op.
+  resolveReconnectToast()
 })
 
 ws.onUnexpectedClose(() => {
@@ -109,15 +202,28 @@ ws.onMessage((event: any) => {
       const exists = participants.value.some((p) => p.id === event.participant.id)
       if (!exists) {
         participants.value.push(event.participant)
+        // A name we didn't have yet arrived over the wire: another client added
+        // it. (Our own adds are reconciled by id and already present, so they
+        // don't toast here.)
+        pushToast(
+          `${event.participant.name} joined`,
+          'info',
+          identityColor(event.participant.name),
+        )
       }
       break
     }
     case 'participants_added': {
+      let added = 0
       for (const p of event.participants) {
         const exists = participants.value.some((ep) => ep.id === p.id)
         if (!exists) {
           participants.value.push(p)
+          added++
         }
+      }
+      if (added > 0) {
+        pushToast(`${added} ${added === 1 ? 'name' : 'names'} added`, 'info')
       }
       break
     }
@@ -142,11 +248,19 @@ ws.onMessage((event: any) => {
         picked: event.picked,
         remaining: event.remaining,
       }
+      // Note a remote spin's outcome; the local winner reveal modal already
+      // covers our own spins (those set suppressWsSpin above).
+      pushToast(
+        `${event.picked.name} was picked`,
+        'spin',
+        identityColor(event.picked.name),
+      )
       break
     }
     case 'session_reset': {
       participants.value = event.participants
       lastSpinResult.value = null
+      pushToast('Session reset', 'info')
       break
     }
   }
@@ -170,6 +284,7 @@ export function useSession() {
       cancelReconnect()
       session.value = await api.createSession(title)
       participants.value = []
+      rememberSession(session.value)
       window.location.hash = `#/${session.value.id}`
       ws.connect(session.value.id)
     } catch (e: any) {
@@ -187,6 +302,7 @@ export function useSession() {
       const data = await api.getSession(id)
       session.value = data.session
       participants.value = data.participants
+      rememberSession(data.session)
       ws.connect(id)
     } catch (e: any) {
       error.value = e.message
@@ -318,6 +434,7 @@ export function useSession() {
     error,
     lastSpinResult,
     remoteSpinResult,
+    recentSessions,
     wsConnected: ws.connected,
     create,
     load,
