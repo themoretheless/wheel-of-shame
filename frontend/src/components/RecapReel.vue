@@ -2,12 +2,15 @@
 import { computed } from 'vue'
 import type { Participant } from '../types'
 import { identityColor } from '../utils/identity'
+import { buildRecapSummary } from '../utils/recap'
 
 // Curtain-call recap: once the wheel is down to its last name, replay the full
 // run of the night as a stacked reel. Each picked row is read straight from
 // removedParticipants (already sorted by spin_order) and gets a per-row accent
 // sweep tinted to its identity color, the same flourish SpinResult.vue lands on.
 const props = defineProps<{
+  // Session title, used as the heading of the copyable run summary.
+  title: string
   // Everyone eliminated over the session, in spin order (earliest first).
   picked: Participant[]
   // The lone name left on the wheel — the one who survived to the end.
@@ -16,7 +19,15 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'close'): void
+  // Hands the assembled plain-text run summary to the parent, which owns the
+  // clipboard write and result toast (mirroring App.vue's copyLink flow).
+  (e: 'copy', summary: string): void
 }>()
+
+// Assemble the shareable run summary on demand and hand it up for copying.
+function copySummary() {
+  emit('copy', buildRecapSummary(props.title, props.picked, props.survivor))
+}
 
 function initialOf(name: string): string {
   return (name.trim()[0] ?? '?').toUpperCase()
@@ -55,7 +66,12 @@ const survivorColor = computed(() =>
         </li>
       </ol>
 
-      <button @click="emit('close')" class="btn-close">Done</button>
+      <div class="recap-actions">
+        <button @click="copySummary" class="btn-copy" title="Copy run summary">
+          Copy summary
+        </button>
+        <button @click="emit('close')" class="btn-close">Done</button>
+      </div>
     </div>
   </div>
 </template>
@@ -190,9 +206,15 @@ h2 {
   white-space: nowrap;
 }
 
+.recap-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
 .btn-close {
   flex: none;
-  align-self: flex-end;
   padding: 12px 28px;
   border: none;
   border-radius: 8px;
@@ -205,6 +227,24 @@ h2 {
 
 .btn-close:hover {
   filter: brightness(1.08);
+}
+
+/* Secondary, ghost-styled so the primary Done keeps the accent fill. */
+.btn-copy {
+  flex: none;
+  padding: 12px 22px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #dfe6e9;
+  font-weight: bold;
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.btn-copy:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: var(--accent);
 }
 
 @keyframes recap-pop {

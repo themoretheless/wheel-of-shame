@@ -493,6 +493,16 @@ function copyLink() {
   )
 }
 
+// Copy the recap reel's plain-text run summary, reusing copyLink's clipboard +
+// toast flow. RecapReel assembles the text and hands it up so App.vue keeps the
+// single source of toasts.
+function copyRecap(summary: string) {
+  navigator.clipboard.writeText(summary).then(
+    () => pushToast('Run summary copied', 'success'),
+    () => pushToast('Could not copy summary', 'info'),
+  )
+}
+
 // --- Command palette (Cmd-K / Ctrl-K) ---
 const paletteOpen = ref(false)
 
@@ -854,9 +864,11 @@ function onGlobalKeydown(e: KeyboardEvent) {
   <Teleport to="body">
     <RecapReel
       v-if="recapOpen"
+      :title="session?.title ?? ''"
       :picked="removedParticipants"
       :survivor="activeParticipants[0] ?? null"
       @close="recapOpen = false"
+      @copy="copyRecap"
     />
   </Teleport>
 
