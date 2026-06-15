@@ -9,7 +9,7 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js'
 import opentype from 'opentype.js'
 import type { Participant } from '../types'
-import { identityColor } from '../utils/identity'
+import { identityColor, hashName } from '../utils/identity'
 
 const props = defineProps<{
   participants: Participant[]
@@ -1540,6 +1540,8 @@ function animateWinnerReveal(
       // Segment is raised — show Vue modal
       pendingWinnerId = winnerId
       pendingOnDismiss = onDismiss
+      // Ring the winner's identity chord as the card appears.
+      playReveal(winnerName)
       emit('winner-reveal', { id: winnerId, name: winnerName, remaining })
     }
   }
@@ -1737,6 +1739,51 @@ function playCountdown() {
     osc.connect(gain).connect(ctx.destination)
     osc.start(now)
     osc.stop(now + dur + 0.02)
+  } catch {
+    // Audio unavailable — silently skip.
+  }
+}
+
+// Winner stinger: a short pentatonic chord played once when a slice finishes
+// lifting into the spotlight, so the reveal lands with a chime that matches the
+// winner's identity. The root is picked from the same hashName the identity
+// color uses, so a given name always rings the same note (its color and its
+// chord agree). Three triangle oscillators stack a major-pentatonic triad with
+// a soft pluck envelope. Gated on isMuted and reduced motion like the other
+// voices, so the mute button and the OS motion preference silence it together.
+function playReveal(winnerName: string) {
+  if (isMuted.value || prefersReducedMotion()) return
+  try {
+    if (!audioCtx) {
+      const Ctor = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
+      audioCtx = new Ctor()
+    }
+    const ctx = audioCtx
+    if (ctx.state === 'suspended') ctx.resume()
+    const now = ctx.currentTime
+    // Major-pentatonic semitone offsets; the hash picks the root degree so the
+    // chord sits in a consonant scale no matter which name lands.
+    const PENTATONIC = [0, 2, 4, 7, 9]
+    const root = PENTATONIC[hashName(winnerName) % PENTATONIC.length]
+    // C4 base; stack the root with its pentatonic third and fifth for a triad.
+    const semis = [root, root + 4, root + 7]
+    const master = ctx.createGain()
+    master.gain.setValueAtTime(0.16, now)
+    master.connect(ctx.destination)
+    semis.forEach((semi, i) => {
+      const osc = ctx.createOscillator()
+      const gain = ctx.createGain()
+      osc.type = 'triangle'
+      osc.frequency.setValueAtTime(261.63 * Math.pow(2, semi / 12), now)
+      // Light arpeggio: each higher voice enters a hair later for a pluck feel.
+      const start = now + i * 0.045
+      gain.gain.setValueAtTime(0.0001, start)
+      gain.gain.exponentialRampToValueAtTime(0.7, start + 0.012)
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.9)
+      osc.connect(gain).connect(master)
+      osc.start(start)
+      osc.stop(start + 0.95)
+    })
   } catch {
     // Audio unavailable — silently skip.
   }
