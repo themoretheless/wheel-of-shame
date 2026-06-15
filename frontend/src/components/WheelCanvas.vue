@@ -123,7 +123,10 @@ let animFrameId = 0
 // roster changes, so the odds redistribution registers as a soft bloom around
 // the hub (the rings already sit in the bloom pass's path). Its own rAF id so a
 // rapid sequence of edits restarts the pulse cleanly instead of stacking loops.
+// The same id drives the idle breathing loop (breatheOddsHalo), so the two never
+// own the rings at once: a pulse cancels breathing and hands back to it on settle.
 let haloFrameId = 0
+let isBreathing = false
 
 // Cached reusable objects
 const cachedMaterials = new Map<string, THREE.Material>()
@@ -739,6 +742,7 @@ const HALO_PEAK = 0.9 // emissiveIntensity at the pulse crest
 const HALO_DURATION = 620 // ms from crest-ramp through full decay
 function pulseOddsHalo() {
   cancelAnimationFrame(haloFrameId)
+  isBreathing = false
   if (prefersReducedMotion() || isSpinAnimating || props.spinning) return
   if (donutMeshes.length === 0) return
   const start = performance.now()
@@ -759,9 +763,67 @@ function pulseOddsHalo() {
         ;(ring.material as THREE.MeshStandardMaterial).emissiveIntensity = 0
       }
       markDirty()
+      // Hand the rings back to the idle breathe once the pulse has fully decayed,
+      // so the wheel resumes its slow ambient swell instead of going dead-dark.
+      breatheOddsHalo()
     }
   }
   haloFrameId = requestAnimationFrame(frame)
+}
+
+// Ambient idle breathing: while the wheel sits at rest the donut rings swell on a
+// slow sine, a soft "alive and waiting" pulse around the hub (the rings ride the
+// bloom pass, so the swell blooms). It shares haloFrameId with pulseOddsHalo, so
+// the two never write emissiveIntensity at once: a roster pulse cancels breathing
+// and hands back here on settle. Gated on idle state and reduced motion; the loop
+// self-stops (zeroing intensity) the moment a spin or reveal takes the wheel.
+const BREATHE_PEAK = 0.18 // emissiveIntensity at the swell crest (well under HALO_PEAK)
+const BREATHE_PERIOD = 4200 // ms for one full breathe cycle
+function breatheOddsHalo() {
+  cancelAnimationFrame(haloFrameId)
+  if (prefersReducedMotion() || isSpinAnimating || props.spinning) {
+    isBreathing = false
+    return
+  }
+  if (donutMeshes.length === 0) {
+    isBreathing = false
+    return
+  }
+  isBreathing = true
+  const start = performance.now()
+  function frame() {
+    if (!isBreathing || isSpinAnimating || props.spinning || donutMeshes.length === 0) {
+      isBreathing = false
+      for (const ring of donutMeshes) {
+        ;(ring.material as THREE.MeshStandardMaterial).emissiveIntensity = 0
+      }
+      markDirty()
+      return
+    }
+    // 0..1..0 swell: a raised cosine over the period so the crest is gentle and
+    // the troughs return to the resting (unlit) look.
+    const phase = ((performance.now() - start) % BREATHE_PERIOD) / BREATHE_PERIOD
+    const env = 0.5 - 0.5 * Math.cos(phase * Math.PI * 2)
+    const intensity = BREATHE_PEAK * env
+    for (const ring of donutMeshes) {
+      ;(ring.material as THREE.MeshStandardMaterial).emissiveIntensity = intensity
+    }
+    markDirty()
+    haloFrameId = requestAnimationFrame(frame)
+  }
+  haloFrameId = requestAnimationFrame(frame)
+}
+
+// Synchronously park the idle breathe (used when a spin takes the wheel) so the
+// rings drop to their resting look without waiting for the loop's next gate check.
+function stopBreathing() {
+  if (!isBreathing) return
+  isBreathing = false
+  cancelAnimationFrame(haloFrameId)
+  for (const ring of donutMeshes) {
+    ;(ring.material as THREE.MeshStandardMaterial).emissiveIntensity = 0
+  }
+  markDirty()
 }
 
 function addWheelCenter() {
@@ -1256,10 +1318,14 @@ function initScene() {
       curvedTextGeoCache.clear()
       textWidthCache.clear()
       buildWheel()
+      // Rings are rebuilt on the font swap; resume the idle breathe on the fresh set.
+      breatheOddsHalo()
     }
   })
 
   buildWheel()
+  // Kick off the ambient idle breathe so the wheel reads as alive while it waits.
+  breatheOddsHalo()
   animateCoinDrop()
   startRenderLoop()
 
@@ -2027,6 +2093,8 @@ function animateSpin() {
   let prevWhooshRot = startRot
 
   isSpinAnimating = true
+  // Park the idle breathe so the rings sit dark while the spin owns the wheel.
+  stopBreathing()
   setHoveredBtn(null)
   clearSegmentHover()
   resetSegments()
@@ -2449,6 +2517,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   cancelAnimationFrame(animFrameId)
   cancelAnimationFrame(haloFrameId)
+  isBreathing = false
   window.removeEventListener('resize', handleResize)
   textGeoCache.forEach((g) => g.dispose())
   textGeoCache.clear()
