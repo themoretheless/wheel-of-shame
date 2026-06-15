@@ -90,9 +90,25 @@ function onDocPointerDown(e: PointerEvent) {
 // Participant id whose wheel segment is currently under the pointer mid-spin;
 // NameList flashes the matching roster row in sync. Null when not spinning.
 const tickingId = ref<string | null>(null)
-// Participant id of the roster row the cursor is hovering (null when none);
-// forwarded to WheelCanvas so the matching wheel segment lifts as a hover peek.
-const peekId = ref<string | null>(null)
+// Participant id of the roster row the cursor is hovering (null when none).
+const hoverPeekId = ref<string | null>(null)
+// Roving keyboard focus: the participant walked to with Tab/Shift+Tab, lifting
+// its wheel segment without a mouse. Mouse hover takes priority so a real cursor
+// move overrides the keyboard ring.
+const focusedId = ref<string | null>(null)
+// Segment to lift as a peek, forwarded to WheelCanvas. Hover wins over keyboard
+// focus; both feed the same eased lift path on the canvas.
+const peekId = computed(() => hoverPeekId.value ?? focusedId.value)
+// Spoken label for the keyboard focus ring, mirrored into an aria-live region so
+// screen readers hear the focused name and its odds as Tab walks the roster.
+const focusAnnounce = computed(() => {
+  const id = focusedId.value
+  if (!id) return ''
+  const hit = activeParticipants.value.find((p) => p.id === id)
+  if (!hit) return ''
+  const odds = Math.round(100 / activeParticipants.value.length)
+  return `${hit.name}, ${odds}% chance`
+})
 // Identity color of the segment currently under the pointer, pulled through the
 // chrome as the --live-accent CSS var: the dock gains a thin accent bar and the
 // spin vignette's inner stop warms toward this hue, so the active name's color
@@ -412,6 +428,15 @@ watch(removedParticipants, (removed) => {
   }
 })
 
+// Drop the keyboard focus ring if the focused name leaves the wheel (picked by a
+// spin, removed by hand, or cleared on reset) so the ring never points at a
+// stale segment.
+watch(activeParticipants, (list) => {
+  if (focusedId.value && !list.some((p) => p.id === focusedId.value)) {
+    focusedId.value = null
+  }
+})
+
 async function createSession() {
   const title = titleInput.value.trim()
   if (!title) return
@@ -433,6 +458,8 @@ async function handleSpin() {
   pendingSpinResult = result
   winnerId.value = result.picked.id
   spinning.value = true
+  // The spin owns the wheel now, so retire the keyboard focus ring.
+  focusedId.value = null
 }
 
 function onWinnerReveal(data: { id: string; name: string; remaining: number }) {
@@ -450,7 +477,10 @@ function onTickSegment(participantId: string | null) {
 }
 
 function onHoverName(id: string | null) {
-  peekId.value = id
+  hoverPeekId.value = id
+  // A real hover supersedes the keyboard ring, so Tab focus doesn't linger on a
+  // different segment than the one the cursor is over.
+  if (id) focusedId.value = null
 }
 
 function resetView() {
@@ -593,6 +623,27 @@ function isEditableTarget(target: EventTarget | null): boolean {
   return tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable
 }
 
+// Roving focus ring: step the keyboard-lifted segment to the next/previous
+// active name, wrapping at the ends. A fresh walk (nothing focused yet) starts
+// at the first name forward / last name backward. Clears the mouse peek so the
+// ring is the sole highlight while the keyboard drives it.
+function cycleFocus(dir: 1 | -1) {
+  const list = activeParticipants.value
+  if (list.length === 0) {
+    focusedId.value = null
+    return
+  }
+  hoverPeekId.value = null
+  const current = list.findIndex((p) => p.id === focusedId.value)
+  let next: number
+  if (current === -1) {
+    next = dir === 1 ? 0 : list.length - 1
+  } else {
+    next = (current + dir + list.length) % list.length
+  }
+  focusedId.value = list[next].id
+}
+
 function onGlobalKeydown(e: KeyboardEvent) {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
     e.preventDefault()
@@ -635,6 +686,22 @@ function onGlobalKeydown(e: KeyboardEvent) {
     // No-ops on the create screen, where the roster panel isn't mounted yet.
     e.preventDefault()
     nameListRef.value?.focusInput()
+  } else if (
+    e.key === 'Tab' &&
+    !e.metaKey &&
+    !e.ctrlKey &&
+    !e.altKey &&
+    !isEditableTarget(e.target) &&
+    !winnerData.value &&
+    !recapOpen.value &&
+    !spinning.value &&
+    activeParticipants.value.length > 0
+  ) {
+    // Roving focus ring: Tab walks the wheel forward, Shift+Tab backward,
+    // lifting each segment in turn so the roster can be explored without a mouse.
+    // Held back while a spin/overlay owns the wheel.
+    e.preventDefault()
+    cycleFocus(e.shiftKey ? -1 : 1)
   } else if (e.code === 'Space' && !isEditableTarget(e.target)) {
     e.preventDefault()
     // Don't spin underneath the winner modal or the recap reel: Space is inert
@@ -677,6 +744,10 @@ function onGlobalKeydown(e: KeyboardEvent) {
         <span class="fire-text" data-text="Wheel of Shame">Wheel of Shame</span>
       </h1>
     </header>
+
+    <!-- Roving focus ring announcer: as Tab walks the wheel, the focused name
+         and its odds are spoken here for screen readers. -->
+    <span class="visually-hidden" aria-live="polite">{{ focusAnnounce }}</span>
 
     <!-- Snap-home pill: appears when the orbit camera is dragged off its
          resting framing, restoring the default view on click. -->
@@ -886,6 +957,20 @@ function onGlobalKeydown(e: KeyboardEvent) {
 </template>
 
 <style scoped>
+/* Off-screen but readable by assistive tech: drives the roving-focus aria-live
+   announcer without taking up layout or catching the eye. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
 .overlay {
   position: relative;
   z-index: 1;
