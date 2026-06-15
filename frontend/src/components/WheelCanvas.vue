@@ -198,6 +198,11 @@ let dividerLines: (THREE.Line | null)[] = []
 let lastAzimuth = 0
 let azimuthVelocity = 0
 let isPointerDown = false
+// True once the in-progress drag has built enough azimuth momentum to count as a
+// flick; consumed (fires one spin) on pointer release. Tracking momentum only
+// while dragging keeps programmatic camera moves (intro drop, reset, snap-back)
+// from being mistaken for a flick.
+let wasFlinging = false
 let flickCooldown = 0
 const BASE_CAM_Z = 7.8
 let homeCamZ = BASE_CAM_Z
@@ -1467,21 +1472,31 @@ function startRenderLoop() {
     // controls.update() returns true while damping is still moving
     if (controls && controls.update()) markDirty()
 
-    // Track angular velocity for flick-to-spin
+    // Flick-to-spin: only measure azimuth momentum while the user is actively
+    // dragging the wheel, then fire a single spin when they release with enough
+    // speed. Gating on isPointerDown is essential — otherwise the programmatic
+    // camera motion of the intro coin-drop, a reset, or the snap-back detent
+    // produces a large frame-to-frame azimuth delta that gets misread as a flick
+    // and auto-spins the wheel on load and after every spin.
     if (controls && !isSpinAnimating && !props.spinning && flickCooldown <= 0) {
       const azimuth = controls.getAzimuthalAngle()
-      azimuthVelocity = azimuth - lastAzimuth
-      lastAzimuth = azimuth
-
-      // Detect fast flick on pointer release
-      if (Math.abs(azimuthVelocity) > FLICK_THRESHOLD && !isPointerDown) {
-        spinDirection = azimuthVelocity > 0 ? 1 : -1
+      if (isPointerDown) {
+        azimuthVelocity = azimuth - lastAzimuth
+        if (Math.abs(azimuthVelocity) > FLICK_THRESHOLD) {
+          wasFlinging = true
+          spinDirection = azimuthVelocity > 0 ? 1 : -1
+        }
+      } else if (wasFlinging) {
+        // Released after a fast drag: spin once in the fling's direction.
+        wasFlinging = false
         emit('spin-click', spinDirection > 0 ? 'right' : 'left')
         azimuthVelocity = 0
         flickCooldown = 120 // ~2 seconds cooldown at 60fps
       }
+      lastAzimuth = azimuth
     } else {
       if (flickCooldown > 0) flickCooldown--
+      wasFlinging = false
       if (controls) lastAzimuth = controls.getAzimuthalAngle()
     }
 
