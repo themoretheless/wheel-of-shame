@@ -183,6 +183,9 @@ function getTextEdgePoints(w: number, h: number): [number, number][] {
 }
 
 function computeTextEdgePoints(w: number, h: number): [number, number][] {
+  // A 0-sized offscreen canvas makes getImageData throw IndexSizeError; bail to
+  // an empty set so a not-yet-laid-out header never crashes flame init.
+  if (w < 1 || h < 1) return []
   const off = document.createElement('canvas')
   off.width = w
   off.height = h
@@ -233,6 +236,7 @@ function initFlame() {
   const EMBER_DRIFT = 280
   let headerH = 0
 
+  let sizeRetry: number | undefined
   function resize() {
     const header = canvas.parentElement
     if (!header) return
@@ -243,6 +247,14 @@ function initFlame() {
     // the header (== buffer width), height matches the buffer's drift-extended
     // height and spills below the header band.
     canvas.style.height = `${canvas.height}px`
+    // On a cold load the header may not be laid out yet (clientWidth 0). Sampling
+    // text edges from a 0-width canvas throws, so skip it and retry next frame
+    // until the header has a real size; the flame simply waits to ignite.
+    if (canvas.width < 1 || headerH < 1) {
+      sizeRetry = requestAnimationFrame(resize)
+      return
+    }
+    sizeRetry = undefined
     edgePoints = getTextEdgePoints(canvas.width, headerH)
   }
   resize()
@@ -258,6 +270,7 @@ function initFlame() {
   flameCleanup = () => {
     window.removeEventListener('resize', onResize)
     clearTimeout(resizeTimer)
+    if (sizeRetry !== undefined) cancelAnimationFrame(sizeRetry)
   }
 
   // Reduced motion: thin the flame to a low flicker rather than a full blaze.
