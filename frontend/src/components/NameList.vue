@@ -25,6 +25,9 @@ const searchQuery = ref('')
 const bulkOpen = ref(false)
 const bulkText = ref('')
 const copyStatus = ref('')
+const viewMode = ref<'all' | 'active' | 'picked'>('all')
+const sortMode = ref<'added' | 'name'>('added')
+const compactRows = ref(false)
 let copyStatusTimer: ReturnType<typeof setTimeout> | undefined
 
 function parseNames(value: string): string[] {
@@ -82,8 +85,30 @@ function participantMatches(p: Participant): boolean {
   return p.name.toLocaleLowerCase().includes(q)
 }
 
-const activeFiltered = computed(() => props.active.filter(participantMatches))
-const removedFiltered = computed(() => props.removed.filter(participantMatches))
+function sortParticipants(list: Participant[], picked: boolean): Participant[] {
+  const sorted = [...list]
+  if (sortMode.value === 'name') {
+    return sorted.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
+  }
+  if (picked) {
+    return sorted.sort((a, b) => (a.spin_order ?? 0) - (b.spin_order ?? 0))
+  }
+  return sorted
+}
+
+const activeFiltered = computed(() =>
+  sortParticipants(props.active.filter(participantMatches), false),
+)
+const removedFiltered = computed(() =>
+  sortParticipants(props.removed.filter(participantMatches), true),
+)
+const showActiveSection = computed(() => viewMode.value !== 'picked')
+const showPickedSection = computed(() => viewMode.value !== 'active')
+const visibleCount = computed(() => {
+  if (viewMode.value === 'active') return activeFiltered.value.length
+  if (viewMode.value === 'picked') return removedFiltered.value.length
+  return activeFiltered.value.length + removedFiltered.value.length
+})
 
 const duplicateNames = computed(() => {
   const counts = new Map<string, { name: string; count: number }>()
@@ -144,7 +169,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="name-list">
+  <div class="name-list" :class="{ compact: compactRows }">
     <div class="roster-top">
       <div>
         <span class="panel-kicker">Roster</span>
@@ -160,6 +185,51 @@ onBeforeUnmount(() => {
       <span><strong>{{ totalCount }}</strong>Total</span>
       <span><strong>{{ active.length }}</strong>Active</span>
       <span><strong>{{ removed.length }}</strong>Picked</span>
+    </div>
+
+    <div class="view-tabs" role="tablist" aria-label="Roster view">
+      <button
+        class="seg-btn"
+        :class="{ active: viewMode === 'all' }"
+        role="tab"
+        :aria-selected="viewMode === 'all'"
+        @click="viewMode = 'all'"
+      >
+        All
+      </button>
+      <button
+        class="seg-btn"
+        :class="{ active: viewMode === 'active' }"
+        role="tab"
+        :aria-selected="viewMode === 'active'"
+        @click="viewMode = 'active'"
+      >
+        Active
+      </button>
+      <button
+        class="seg-btn"
+        :class="{ active: viewMode === 'picked' }"
+        role="tab"
+        :aria-selected="viewMode === 'picked'"
+        @click="viewMode = 'picked'"
+      >
+        Picked
+      </button>
+    </div>
+
+    <div class="rail-controls">
+      <label class="sort-control">
+        <span>Sort</span>
+        <select v-model="sortMode">
+          <option value="added">Added</option>
+          <option value="name">Name</option>
+        </select>
+      </label>
+      <label class="compact-toggle">
+        <input v-model="compactRows" type="checkbox" />
+        <span class="toggle-box" aria-hidden="true"></span>
+        <span>Compact</span>
+      </label>
     </div>
 
     <div class="input-group">
@@ -225,7 +295,7 @@ onBeforeUnmount(() => {
       </button>
     </div>
 
-    <div class="participants">
+    <div v-if="showActiveSection" class="participants">
       <div class="section-heading">
         <h3>Active</h3>
         <span>{{ activeFiltered.length }} shown</span>
@@ -257,7 +327,7 @@ onBeforeUnmount(() => {
       <p v-else class="empty">{{ active.length === 0 ? 'No participants yet' : 'No matches' }}</p>
     </div>
 
-    <div v-if="removed.length > 0" class="participants removed-list">
+    <div v-if="showPickedSection && (removed.length > 0 || viewMode === 'picked')" class="participants removed-list">
       <div class="section-heading">
         <h3>Picked</h3>
         <span>{{ removedFiltered.length }} shown</span>
@@ -272,9 +342,19 @@ onBeforeUnmount(() => {
           </span>
         </li>
       </ol>
-      <p v-else class="empty">No picked matches</p>
-      <button @click="emit('reset')" class="btn btn-reset">Reset All</button>
+      <p v-else class="empty">{{ removed.length === 0 ? 'No picks yet' : 'No picked matches' }}</p>
+      <button
+        @click="emit('reset')"
+        class="btn btn-reset"
+        :disabled="removed.length === 0"
+      >
+        Reset All
+      </button>
     </div>
+
+    <p v-if="searchQuery" class="view-footnote">
+      {{ visibleCount }} visible
+    </p>
   </div>
 </template>
 
@@ -351,6 +431,124 @@ h2 {
   color: #f7fbfc;
   font-size: 16px;
   line-height: 1.1;
+}
+
+.view-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  margin-bottom: 10px;
+  background: rgba(12, 16, 18, 0.42);
+}
+
+.seg-btn {
+  min-width: 0;
+  min-height: 30px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #95a5a6;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.seg-btn:hover,
+.seg-btn.active {
+  background: rgba(78, 205, 196, 0.14);
+  color: #ffffff;
+}
+
+.rail-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.sort-control {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  color: #95a5a6;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.sort-control select {
+  width: 100%;
+  min-height: 32px;
+  border: 1px solid rgba(223, 230, 233, 0.16);
+  border-radius: 8px;
+  background: rgba(12, 16, 18, 0.68);
+  color: #edf3f4;
+  font: inherit;
+  font-size: 13px;
+}
+
+.sort-control select:focus {
+  border-color: #4ecdc4;
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(78, 205, 196, 0.16);
+}
+
+.compact-toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 0 9px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.055);
+  color: #dfe6e9;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.compact-toggle input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.toggle-box {
+  width: 14px;
+  height: 14px;
+  border: 1px solid rgba(223, 230, 233, 0.34);
+  border-radius: 4px;
+  background: rgba(12, 16, 18, 0.68);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.08) inset;
+}
+
+.compact-toggle input:checked + .toggle-box {
+  border-color: rgba(78, 205, 196, 0.7);
+  background: #4ecdc4;
+}
+
+.compact-toggle input:checked + .toggle-box::after {
+  content: "";
+  display: block;
+  width: 7px;
+  height: 4px;
+  margin: 3px 0 0 3px;
+  border: solid #162326;
+  border-width: 0 0 2px 2px;
+  transform: rotate(-45deg);
+}
+
+.compact-toggle input:focus-visible + .toggle-box {
+  box-shadow: 0 0 0 3px rgba(78, 205, 196, 0.18);
 }
 
 .input-group {
@@ -588,6 +786,26 @@ ol {
   text-decoration: line-through;
 }
 
+.name-list.compact .participant-item {
+  min-height: 32px;
+  padding: 5px 8px;
+  margin-bottom: 4px;
+}
+
+.name-list.compact .identity-token {
+  width: 20px;
+  height: 20px;
+  font-size: 10px;
+}
+
+.name-list.compact .participants {
+  margin-top: 10px;
+}
+
+.name-list.compact .section-heading {
+  margin-bottom: 6px;
+}
+
 /* Optimistic add: a settling skeleton chip that pulses until the server
    confirms, then reconciles into a normal row. */
 .participant-item.pending {
@@ -669,5 +887,12 @@ ol {
 
 .btn-reset:hover {
   background: rgba(255, 234, 167, 0.2);
+}
+
+.view-footnote {
+  margin: 10px 0 0;
+  color: #758184;
+  font-size: 12px;
+  text-align: right;
 }
 </style>
