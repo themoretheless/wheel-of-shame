@@ -6,6 +6,14 @@ import { ref } from 'vue'
 
 export type ToastKind = 'info' | 'success' | 'spin' | 'warn'
 
+// A single reverse action surfaced as a button inside the toast (Linear-style
+// "Undo"). Clicking it runs `run` and then dismisses the toast. The toast still
+// auto-dismisses on its TTL if the action is never taken.
+export interface ToastAction {
+  label: string
+  run: () => void
+}
+
 export interface Toast {
   id: number
   message: string
@@ -17,6 +25,9 @@ export interface Toast {
   // converted to a timed toast (used for connection state, which must persist
   // until the socket is back). Default is a timed toast.
   sticky?: boolean
+  // Optional reverse action (e.g. "Undo" after a remove/add). Rendered as a
+  // button by ToastStack; taking it runs the action and dismisses the toast.
+  action?: ToastAction
 }
 
 // Patch accepted by update(): re-message or re-style a live toast in place, e.g.
@@ -26,6 +37,7 @@ export interface ToastPatch {
   kind?: ToastKind
   accent?: string
   sticky?: boolean
+  action?: ToastAction
 }
 
 const toasts = ref<Toast[]>([])
@@ -53,9 +65,10 @@ function push(
   kind: ToastKind = 'info',
   accent?: string,
   sticky = false,
+  action?: ToastAction,
 ): number {
   const id = nextId++
-  toasts.value.push({ id, message, kind, accent, sticky })
+  toasts.value.push({ id, message, kind, accent, sticky, action })
   // Trim the oldest beyond the cap so the stack stays bounded.
   while (toasts.value.length > MAX_TOASTS) {
     const dropped = toasts.value.shift()
@@ -88,6 +101,7 @@ function update(id: number, patch: ToastPatch): boolean {
   if (patch.message !== undefined) toast.message = patch.message
   if (patch.kind !== undefined) toast.kind = patch.kind
   if (patch.accent !== undefined) toast.accent = patch.accent
+  if (patch.action !== undefined) toast.action = patch.action
   if (patch.sticky !== undefined && patch.sticky !== toast.sticky) {
     toast.sticky = patch.sticky
     const existing = timers.get(id)

@@ -1,10 +1,18 @@
 <script setup lang="ts">
 import { useToasts } from '../composables/useToasts'
+import type { Toast } from '../composables/useToasts'
 
 // Renders the shared toast queue as a bottom-right stack of glass pills. The
 // queue lives in useToasts so WS handlers and App can push without prop-
 // drilling; this component is the single sink, Teleported to body in App.vue.
 const { toasts, dismiss } = useToasts()
+
+// Take a toast's reverse action (e.g. "Undo"), then dismiss the toast. Stops
+// propagation so the click doesn't also hit the container's dismiss handler.
+function runAction(t: Toast) {
+  t.action?.run()
+  dismiss(t.id)
+}
 </script>
 
 <template>
@@ -20,6 +28,14 @@ const { toasts, dismiss } = useToasts()
       >
         <span class="toast-dot" aria-hidden="true"></span>
         <span class="toast-msg">{{ t.message }}</span>
+        <button
+          v-if="t.action"
+          type="button"
+          class="toast-action"
+          @click.stop="runAction(t)"
+        >
+          {{ t.action.label }}
+        </button>
       </div>
     </TransitionGroup>
   </div>
@@ -66,6 +82,29 @@ const { toasts, dismiss } = useToasts()
   font-size: 13px;
   color: #dfe6e9;
   line-height: 1.3;
+}
+
+/* Reverse-action button (e.g. "Undo"), pushed to the toast's trailing edge and
+   tinted with the same accent as the dot so it reads as the toast's own affordance. */
+.toast-action {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 4px 10px;
+  border: 1px solid var(--toast-accent, #4ECDC4);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--toast-accent, #4ECDC4);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.toast-action:hover {
+  background: var(--toast-accent, #4ECDC4);
+  color: #1a1a1a;
 }
 
 .toast-success {

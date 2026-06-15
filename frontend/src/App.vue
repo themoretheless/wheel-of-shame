@@ -533,6 +533,21 @@ function copyRecap(summary: string) {
   )
 }
 
+// Deliberate manual removal (roster X or the palette's Eliminate command), as
+// opposed to a spin elimination which goes through applySpinResult. Captures the
+// name before deleting so an undo toast can re-add it via the same addName path;
+// the reverse action no-ops gracefully if the toast TTL lapses untaken. Spin
+// eliminations are untouched and never get an undo.
+function handleRemove(id: string) {
+  const name = activeParticipants.value.find((p) => p.id === id)?.name
+  removeName(id)
+  if (!name) return
+  pushToast(`Removed ${name}`, 'info', identityColor(name), false, {
+    label: 'Undo',
+    run: () => addName(name),
+  })
+}
+
 // --- Command palette (Cmd-K / Ctrl-K) ---
 const paletteOpen = ref(false)
 
@@ -607,7 +622,7 @@ const paletteCommands = computed<Command[]>(() => [
       hint: 'Remove',
       group: 'Eliminate',
       run: () => {
-        removeName(p.id)
+        handleRemove(p.id)
       },
     }
   }),
@@ -911,7 +926,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
               :ticking-id="tickingId"
               @add="addName"
               @add-batch="addNames"
-              @remove="removeName"
+              @remove="handleRemove"
               @hover-name="onHoverName"
             @reset="reset"
             />

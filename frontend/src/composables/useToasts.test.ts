@@ -108,4 +108,23 @@ describe('useToasts', () => {
     const { update } = useToasts()
     expect(update(999999, { message: 'nope' })).toBe(false)
   })
+
+  it('carries a reverse action through push', () => {
+    const { toasts, push } = useToasts()
+    const run = vi.fn()
+    push('removed', 'info', undefined, false, { label: 'Undo', run })
+    expect(toasts.value[0].action?.label).toBe('Undo')
+    // The action is stored, not invoked, until the user takes it.
+    expect(run).not.toHaveBeenCalled()
+    toasts.value[0].action?.run()
+    expect(run).toHaveBeenCalledTimes(1)
+  })
+
+  it('a toast with an action still auto-dismisses on its TTL', () => {
+    const { toasts, push } = useToasts()
+    push('removed', 'info', undefined, false, { label: 'Undo', run: () => {} })
+    expect(toasts.value).toHaveLength(1)
+    vi.advanceTimersByTime(3200)
+    expect(toasts.value).toHaveLength(0)
+  })
 })
