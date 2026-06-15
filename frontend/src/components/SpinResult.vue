@@ -39,7 +39,7 @@ const emit = defineEmits<{
 .result-card {
   background: #2d3436;
   border: 2px solid #4ECDC4;
-  border-radius: 16px;
+  border-radius: 8px;
   padding: 40px 60px;
   text-align: center;
   animation: pop 0.3s ease-out;

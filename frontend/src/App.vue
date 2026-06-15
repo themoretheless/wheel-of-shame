@@ -29,6 +29,8 @@ const spinning = ref(false)
 const winnerId = ref<string | null>(null)
 const wheelRef = ref<{ dismissWinner: () => void } | null>(null)
 const winnerData = ref<{ id: string; name: string; remaining: number } | null>(null)
+const copyNotice = ref('')
+let copyNoticeTimer: ReturnType<typeof setTimeout> | undefined
 let isLocalSpin = false
 let pendingSpinResult: import('./types').SpinResult | null = null
 
@@ -222,6 +224,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   cancelAnimationFrame(flameAnimId)
+  clearTimeout(copyNoticeTimer)
   flameCleanup?.()
   window.removeEventListener('keydown', onGlobalKeydown)
 })
@@ -292,10 +295,76 @@ function onSpinComplete(_participantId: string) {
   remoteSpinResult.value = null
 }
 
+const totalParticipants = computed(
+  () => activeParticipants.value.length + removedParticipants.value.length,
+)
+const pickedPercent = computed(() => {
+  if (totalParticipants.value === 0) return 0
+  return Math.round((removedParticipants.value.length / totalParticipants.value) * 100)
+})
+const nextOddsLabel = computed(() => {
+  if (activeParticipants.value.length === 0) return '0%'
+  const odds = 100 / activeParticipants.value.length
+  return `${odds >= 10 ? Math.round(odds) : odds.toFixed(1)}%`
+})
+const progressStyle = computed(() => ({ width: `${pickedPercent.value}%` }))
+
+function showCopyNotice(message: string) {
+  copyNotice.value = message
+  clearTimeout(copyNoticeTimer)
+  copyNoticeTimer = setTimeout(() => {
+    copyNotice.value = ''
+  }, 1600)
+}
+
+async function copyText(text: string, message: string) {
+  if (!text) return
+  try {
+    await navigator.clipboard.writeText(text)
+    showCopyNotice(message)
+  } catch {
+    const area = document.createElement('textarea')
+    area.value = text
+    area.setAttribute('readonly', 'true')
+    area.style.position = 'fixed'
+    area.style.left = '-9999px'
+    document.body.appendChild(area)
+    area.select()
+    document.execCommand('copy')
+    area.remove()
+    showCopyNotice(message)
+  }
+}
+
 function copyLink() {
   if (!session.value) return
   const url = `${window.location.origin}${window.location.pathname}#/${session.value.id}`
-  navigator.clipboard.writeText(url)
+  void copyText(url, 'Share link copied')
+}
+
+function copyActiveNames() {
+  const text = activeParticipants.value.map((p) => p.name).join('\n')
+  void copyText(text, 'Active names copied')
+}
+
+function copyPickedOrder() {
+  const text = removedParticipants.value
+    .map((p, index) => `#${p.spin_order ?? index + 1} ${p.name}`)
+    .join('\n')
+  void copyText(text, 'Picked order copied')
+}
+
+function copyRosterSnapshot() {
+  if (!session.value) return
+  const title = session.value.title
+  const active = activeParticipants.value.map((p) => `- ${p.name}`).join('\n') || '- none'
+  const picked = removedParticipants.value
+    .map((p, index) => `${p.spin_order ?? index + 1}. ${p.name}`)
+    .join('\n') || 'none'
+  void copyText(
+    `${title}\n\nActive\n${active}\n\nPicked\n${picked}`,
+    'Roster snapshot copied',
+  )
 }
 
 // --- Command palette (Cmd-K / Ctrl-K) ---
@@ -337,6 +406,33 @@ const paletteCommands = computed<Command[]>(() => [
     disabled: !session.value,
     run: () => {
       copyLink()
+    },
+  },
+  {
+    id: 'copy-roster',
+    label: 'Copy roster snapshot',
+    hint: 'Export',
+    disabled: !session.value || totalParticipants.value === 0,
+    run: () => {
+      copyRosterSnapshot()
+    },
+  },
+  {
+    id: 'copy-active',
+    label: 'Copy active names',
+    hint: 'Export',
+    disabled: !session.value || activeParticipants.value.length === 0,
+    run: () => {
+      copyActiveNames()
+    },
+  },
+  {
+    id: 'copy-picked',
+    label: 'Copy picked order',
+    hint: 'Export',
+    disabled: !session.value || removedParticipants.value.length === 0,
+    run: () => {
+      copyPickedOrder()
     },
   },
   // One spotlight command per active participant: type a name into Cmd-K and
@@ -426,11 +522,26 @@ function onGlobalKeydown(e: KeyboardEvent) {
     <!-- Session screen -->
     <div v-if="session" class="session-screen">
       <div class="session-header">
+        <div class="session-title-block">
+          <span class="session-label">Live session</span>
+          <h2>{{ session.title }}</h2>
+          <div class="progress-track" aria-hidden="true">
+            <span :style="progressStyle"></span>
+          </div>
+          <div class="session-metrics" aria-label="Session status">
+            <span><strong>{{ activeParticipants.length }}</strong> active</span>
+            <span><strong>{{ removedParticipants.length }}</strong> picked</span>
+            <span><strong>{{ nextOddsLabel }}</strong> next odds</span>
+          </div>
+        </div>
         <div class="session-actions">
           <span class="ws-status" :class="{ connected: wsConnected }">
             {{ wsConnected ? 'Live' : 'Offline' }}
           </span>
           <span class="kbd-hint" title="Press Space to spin"><kbd>Space</kbd> to spin</span>
+          <button @click="copyRosterSnapshot" class="btn btn-small" title="Copy roster snapshot">
+            Copy roster
+          </button>
           <button @click="copyLink" class="btn btn-small" title="Copy link">Share</button>
         </div>
       </div>
@@ -449,12 +560,14 @@ function onGlobalKeydown(e: KeyboardEvent) {
               @add="addName"
               @add-batch="addNames"
               @remove="removeName"
-            @reset="reset"
+              @reset="reset"
             />
           </div>
         </div>
       </div>
     </div>
+
+    <div v-if="copyNotice" class="copy-toast" role="status">{{ copyNotice }}</div>
 
   </div>
 
@@ -479,7 +592,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
   position: relative;
   z-index: 1;
   min-height: 100vh;
-  padding: 20px;
+  padding: 22px;
   pointer-events: none;
 }
 
@@ -492,16 +605,17 @@ function onGlobalKeydown(e: KeyboardEvent) {
 .overlay .btn,
 .overlay .panel,
 .overlay input,
-.overlay .ws-status {
+.overlay .ws-status,
+.overlay .copy-toast {
   pointer-events: auto;
 }
 
 .fire-header {
   text-align: center;
-  margin-bottom: 32px;
+  margin-bottom: 18px;
   position: relative;
   height: 80px;
-  padding-right: 340px;
+  padding-right: 400px;
 }
 
 .flame-canvas {
@@ -601,6 +715,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
   cursor: pointer;
   font-weight: bold;
   font-size: 16px;
+  transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease;
 }
 
 .btn-primary {
@@ -613,15 +728,18 @@ function onGlobalKeydown(e: KeyboardEvent) {
 }
 
 .btn-small {
-  padding: 6px 14px;
+  padding: 8px 12px;
   font-size: 12px;
-  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(18, 23, 27, 0.72);
   backdrop-filter: blur(8px);
-  color: #dfe6e9;
+  color: #f7fbfc;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
 }
 
 .btn-small:hover {
-  background: rgba(255, 255, 255, 0.2);
+  border-color: rgba(78, 205, 196, 0.35);
+  background: rgba(78, 205, 196, 0.14);
 }
 
 .btn-warning {
@@ -629,16 +747,19 @@ function onGlobalKeydown(e: KeyboardEvent) {
 }
 
 .ws-status {
+  border: 1px solid rgba(231, 76, 60, 0.28);
   font-size: 11px;
-  padding: 4px 10px;
-  border-radius: 12px;
-  background: rgba(231, 76, 60, 0.2);
-  color: #e74c3c;
+  padding: 5px 10px;
+  border-radius: 8px;
+  background: rgba(35, 18, 20, 0.7);
+  color: #ff8a7f;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
 }
 
 .ws-status.connected {
-  background: rgba(78, 205, 196, 0.2);
-  color: #4ECDC4;
+  border-color: rgba(78, 205, 196, 0.3);
+  background: rgba(14, 42, 42, 0.72);
+  color: #7ff5ec;
 }
 
 .kbd-hint {
@@ -658,20 +779,89 @@ function onGlobalKeydown(e: KeyboardEvent) {
 .session-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  margin-bottom: 24px;
+  align-items: flex-start;
+  gap: 24px;
+  margin-bottom: 18px;
+}
+
+.session-title-block {
+  width: min(460px, 52vw);
+  min-width: 260px;
+  pointer-events: auto;
+}
+
+.session-label {
+  display: block;
+  margin-bottom: 4px;
+  color: rgba(223, 230, 233, 0.62);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+  text-shadow: 0 1px 10px rgba(0, 0, 0, 0.55);
 }
 
 .session-header h2 {
   margin: 0;
+  max-width: 100%;
+  overflow: hidden;
+  color: #f7fbfc;
+  font-size: 24px;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-shadow: 0 1px 10px rgba(0, 0, 0, 0.6);
+}
+
+.progress-track {
+  width: 100%;
+  height: 5px;
+  margin-top: 12px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #4ecdc4, #ffeaa7, #ff6b6b);
+  transition: width 0.25s ease;
+}
+
+.session-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.session-metrics span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 26px;
+  padding: 5px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(18, 23, 27, 0.48);
   color: #dfe6e9;
-  text-shadow: 0 1px 10px rgba(0,0,0,0.5);
+  font-size: 12px;
+  text-shadow: 0 1px 10px rgba(0, 0, 0, 0.5);
+}
+
+.session-metrics strong {
+  color: #ffffff;
 }
 
 .session-actions {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 8px;
   align-items: center;
+  max-width: 380px;
 }
 
 .main-layout {
@@ -688,28 +878,64 @@ function onGlobalKeydown(e: KeyboardEvent) {
   justify-content: flex-end;
   min-height: 70vh;
   padding-bottom: 40px;
-  margin-right: 340px;
+  margin-right: 400px;
 }
 
 .list-section {
   position: fixed;
-  top: 80px;
-  right: 20px;
-  width: 320px;
-  max-height: calc(100vh - 100px);
+  top: 94px;
+  right: 22px;
+  width: min(360px, calc(100vw - 44px));
+  max-height: calc(100vh - 116px);
   overflow-y: auto;
+  scrollbar-width: thin;
 }
 
 .panel {
-  background: rgba(60, 60, 60, 0.75);
+  background: rgba(31, 38, 41, 0.82);
   backdrop-filter: blur(16px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 16px;
-  padding: 20px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 18px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.32);
+}
+
+.copy-toast {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 20;
+  padding: 10px 13px;
+  border: 1px solid rgba(78, 205, 196, 0.38);
+  border-radius: 8px;
+  background: rgba(19, 31, 33, 0.92);
+  color: #7ff5ec;
+  font-size: 13px;
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.36);
 }
 
 
 @media (max-width: 700px) {
+  .overlay {
+    padding: 14px;
+  }
+  .session-header {
+    display: block;
+    margin-bottom: 10px;
+  }
+  .session-title-block {
+    width: 100%;
+    min-width: 0;
+    margin-bottom: 10px;
+  }
+  .session-header h2 {
+    font-size: 20px;
+    white-space: normal;
+  }
+  .session-actions {
+    justify-content: flex-start;
+    max-width: none;
+  }
   .list-section {
     position: fixed;
     top: auto;
@@ -717,17 +943,27 @@ function onGlobalKeydown(e: KeyboardEvent) {
     right: 0;
     left: 0;
     width: 100%;
-    max-height: 50vh;
+    max-height: 54vh;
   }
   .panel {
-    border-radius: 16px 16px 0 0;
+    border-radius: 8px 8px 0 0;
+    padding: 16px;
   }
   .fire-header {
+    height: 64px;
+    margin-bottom: 8px;
     padding-right: 0;
+  }
+  .fire-title {
+    font-size: 32px;
   }
   .wheel-section {
     min-height: 40vh;
     margin-right: 0;
+  }
+  .copy-toast {
+    right: 14px;
+    bottom: calc(54vh + 12px);
   }
 }
 </style>

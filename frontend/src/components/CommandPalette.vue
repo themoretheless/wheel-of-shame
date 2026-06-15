@@ -170,10 +170,10 @@ function onKeydown(e: KeyboardEvent) {
 .palette {
   width: 100%;
   max-width: 520px;
-  background: rgba(45, 52, 54, 0.85);
+  background: rgba(31, 38, 41, 0.92);
   backdrop-filter: blur(16px);
   border: 1px solid rgba(78, 205, 196, 0.35);
-  border-radius: 14px;
+  border-radius: 8px;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
   overflow: hidden;
   animation: palette-pop 0.18s ease-out;

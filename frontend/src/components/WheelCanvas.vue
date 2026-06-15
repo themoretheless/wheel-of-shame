@@ -674,7 +674,7 @@ function animateSegmentShrink(winnerId: string, callback: () => void) {
   requestAnimationFrame(frame)
 }
 
-const MENU_WIDTH = 360 // 320px panel + 20px gap + margin
+const MENU_WIDTH = 400 // 360px panel + 22px margin + breathing room
 const PADDING = 40 // extra breathing room in pixels
 const CAM_FOV = 38
 
@@ -683,9 +683,10 @@ function fitWheel() {
 
   const vw = window.innerWidth
   const vh = window.innerHeight
+  const sideMenuWidth = vw <= 700 ? 0 : MENU_WIDTH
 
   // Available space for wheel
-  const availW = vw - MENU_WIDTH - PADDING * 2
+  const availW = vw - sideMenuWidth - PADDING * 2
   const availH = vh - PADDING * 2
 
   // World size of wheel (diameter + hinged pointer + margin)
@@ -713,7 +714,7 @@ function fitWheel() {
   // setViewOffset shifts what part of the frustum maps to the screen.
   // Positive offsetX shifts the rendered image to the right,
   // making the wheel appear to the left of viewport center.
-  camera.setViewOffset(vw, vh, MENU_WIDTH / 2, 0, vw, vh)
+  camera.setViewOffset(vw, vh, sideMenuWidth / 2, 0, vw, vh)
 
   // Wheel and orbit target stay at origin — rotation is around the wheel
   pivotGroup.position.x = 0
@@ -894,7 +895,7 @@ function initScene() {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
   renderer.setClearColor(0x1e1e1e, 1)
   renderer.toneMapping = THREE.ACESFilmicToneMapping
-  renderer.toneMappingExposure = 1.2
+  renderer.toneMappingExposure = 0.82
   container.appendChild(renderer.domElement)
 
   // Studio image-based lighting: bake a RoomEnvironment into a PMREM so the
@@ -910,7 +911,7 @@ function initScene() {
   composer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
   composer.setSize(w, h)
   composer.addPass(new RenderPass(scene, camera))
-  composer.addPass(new UnrealBloomPass(new THREE.Vector2(w, h), 0.55, 0.5, 0.85))
+  composer.addPass(new UnrealBloomPass(new THREE.Vector2(w, h), 0.2, 0.35, 0.92))
   composer.addPass(new OutputPass())
 
   controls = new OrbitControls(camera, renderer.domElement)
@@ -923,16 +924,16 @@ function initScene() {
   controls.maxPolarAngle = Math.PI - 0.3
   controls.addEventListener('change', markDirty)
 
-  scene.add(new THREE.AmbientLight(0xffffff, 0.7))
-  const key = new THREE.DirectionalLight(0xffffff, 1.0)
+  scene.add(new THREE.AmbientLight(0xffffff, 0.5))
+  const key = new THREE.DirectionalLight(0xffffff, 0.82)
   key.position.set(2, 4, 8)
   scene.add(key)
-  const fill = new THREE.DirectionalLight(0x8899cc, 0.35)
+  const fill = new THREE.DirectionalLight(0x8899cc, 0.24)
   fill.position.set(-3, -2, 6)
   scene.add(fill)
 
   // Specular highlight light for metallic text
-  const specLight = new THREE.PointLight(0xffffff, 3, 20)
+  const specLight = new THREE.PointLight(0xffffff, 1.5, 20)
   specLight.position.set(0, 2, 6)
   scene.add(specLight)
 
@@ -1102,6 +1103,9 @@ function animateCoinDrop() {
       if (controls) {
         controls.update()
         controls.enabled = true
+        lastAzimuth = controls.getAzimuthalAngle()
+        azimuthVelocity = 0
+        flickCooldown = 60
       }
       if (pointerMesh) pointerMesh.visible = true
     }
@@ -1117,7 +1121,7 @@ function startRenderLoop() {
     if (controls && controls.update()) markDirty()
 
     // Track angular velocity for flick-to-spin
-    if (controls && !isSpinAnimating && !props.spinning && flickCooldown <= 0) {
+    if (controls && controls.enabled && !isSpinAnimating && !props.spinning && flickCooldown <= 0) {
       const azimuth = controls.getAzimuthalAngle()
       azimuthVelocity = azimuth - lastAzimuth
       lastAzimuth = azimuth
