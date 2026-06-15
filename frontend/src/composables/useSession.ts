@@ -5,7 +5,7 @@ import { useWebSocket } from './useWebSocket'
 import { useToasts } from './useToasts'
 import { identityColor } from '../utils/identity'
 
-const { push: pushToast } = useToasts()
+const { push: pushToast, update: updateToast, dismiss: dismissToast } = useToasts()
 
 const session = ref<Session | null>(null)
 const participants = ref<Participant[]>([])
@@ -90,6 +90,34 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 // Bumped whenever a new connection is established intentionally (load/create)
 // or the session is torn down, invalidating any in-flight reconnect loop.
 let reconnectGen = 0
+// Handle to the sticky "reconnecting…" toast, raised on the first drop and
+// resolved (or dropped) once the socket comes back or we give up. Null when no
+// outage is being surfaced, which also gates the "Reconnected" success toast so
+// the very first connect on load never reports a reconnection.
+let reconnectToastId: number | null = null
+
+// Raise the sticky reconnect pill on the first drop of an outage; later attempts
+// reuse the same toast so a long outage doesn't stack a new pill each backoff.
+function showReconnectingToast() {
+  if (reconnectToastId !== null) return
+  reconnectToastId = pushToast('Connection lost, reconnecting…', 'warn', undefined, true)
+}
+
+// Flip the sticky reconnect pill to a timed success toast once the socket is
+// back. No-op if no outage was being surfaced (e.g. the initial connect).
+function resolveReconnectToast() {
+  if (reconnectToastId === null) return
+  updateToast(reconnectToastId, { message: 'Reconnected', kind: 'success', sticky: false })
+  reconnectToastId = null
+}
+
+// Tear the sticky reconnect pill down without a success note, e.g. when the
+// session is abandoned or the server is gone for good.
+function clearReconnectToast() {
+  if (reconnectToastId === null) return
+  dismissToast(reconnectToastId)
+  reconnectToastId = null
+}
 
 function cancelReconnect() {
   reconnectGen++
@@ -98,10 +126,15 @@ function cancelReconnect() {
     clearTimeout(reconnectTimer)
     reconnectTimer = null
   }
+  // An intentional reconnect (load/create/teardown) ends any outage we were
+  // surfacing, so retire the sticky pill rather than leaving it stuck.
+  clearReconnectToast()
 }
 
 function scheduleReconnect() {
   if (!session.value || reconnectTimer) return
+  // Surface the outage on the very first scheduled retry; reused for the rest.
+  showReconnectingToast()
   const gen = reconnectGen
   const backoff = Math.min(
     RECONNECT_BASE_MS * 2 ** reconnectAttempt,
@@ -154,6 +187,9 @@ ws.onOpen(() => {
   // A real open is the only success signal that clears the backoff, so the
   // next unexpected drop starts the delay sequence over from the base.
   reconnectAttempt = 0
+  // If an outage was being surfaced, flip its sticky pill to a "Reconnected"
+  // note; on the initial connect there is no pill, so this is a no-op.
+  resolveReconnectToast()
 })
 
 ws.onUnexpectedClose(() => {

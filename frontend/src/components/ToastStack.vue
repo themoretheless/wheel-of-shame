@@ -80,6 +80,29 @@ const { toasts, dismiss } = useToasts()
   box-shadow: none;
 }
 
+/* Connection-trouble accent: an amber pill for the sticky "reconnecting…" state,
+   flipped to a success toast once the socket is back. */
+.toast-warn {
+  --toast-accent: #f1c40f;
+}
+
+/* A reconnecting toast pulses its dot so a persistent pill reads as live work in
+   progress rather than a stuck notification. */
+.toast-warn .toast-dot {
+  animation: toast-dot-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes toast-dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toast-warn .toast-dot {
+    animation: none;
+  }
+}
+
 /* Slide-and-fade in from the right, collapse out; the move transition closes the
    gap when an earlier toast in the stack is dismissed. */
 .toast-enter-active,
