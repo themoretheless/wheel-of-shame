@@ -112,6 +112,17 @@ const emit = defineEmits<{
 
 const nameInput = ref('')
 
+// Template ref on the name field so App.vue can route a global "/" or "n"
+// quick-capture keystroke straight into it without the user reaching for the
+// mouse. Exposed via focusInput() below.
+const nameInputEl = ref<HTMLInputElement | null>(null)
+
+function focusInput() {
+  nameInputEl.value?.focus()
+}
+
+defineExpose({ focusInput })
+
 // Staged result of a multi-name paste, awaiting an explicit confirm so a big
 // roster lands in one reviewed batch rather than silently flooding the input.
 const pendingPaste = ref<string[] | null>(null)
@@ -188,6 +199,7 @@ function addName() {
   <div class="name-list">
     <div class="input-group">
       <input
+        ref="nameInputEl"
         v-model="nameInput"
         @keyup.enter="addName"
         @paste="onPaste"

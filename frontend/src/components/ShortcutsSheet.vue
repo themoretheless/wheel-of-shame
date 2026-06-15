@@ -17,6 +17,7 @@ const emit = defineEmits<{
 
 const shortcuts: Shortcut[] = [
   { keys: ['Space'], label: 'Spin the wheel' },
+  { keys: ['/'], label: 'Jump to the name field' },
   { keys: ['⌘', 'K'], label: 'Open command palette' },
   { keys: ['Esc'], label: 'Dismiss winner / close overlays' },
   { keys: ['?'], label: 'Toggle this cheat sheet' },

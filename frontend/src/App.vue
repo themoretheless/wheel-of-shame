@@ -48,6 +48,9 @@ const wheelRef = ref<{
   isMuted: { value: boolean }
   toggleMute: () => void
 } | null>(null)
+// Template ref on the roster panel so a global "/" or "n" quick-capture key can
+// focus its name field without the user reaching for the mouse.
+const nameListRef = ref<{ focusInput: () => void } | null>(null)
 const winnerData = ref<{ id: string; name: string; remaining: number } | null>(null)
 // Curtain-call recap: when the final spin leaves a lone survivor, the recap reel
 // is queued here and shown once the winner lower-third is dismissed, so the two
@@ -610,6 +613,18 @@ function onGlobalKeydown(e: KeyboardEvent) {
   if (e.key === '?' && !isEditableTarget(e.target)) {
     e.preventDefault()
     shortcutsOpen.value = true
+  } else if (
+    (e.key === '/' || e.key === 'n') &&
+    !e.metaKey &&
+    !e.ctrlKey &&
+    !e.altKey &&
+    !isEditableTarget(e.target)
+  ) {
+    // Quick-capture: jump straight to the roster's name field. Guarded against
+    // modifiers so Cmd/Ctrl+N (new window) and friends still reach the browser.
+    // No-ops on the create screen, where the roster panel isn't mounted yet.
+    e.preventDefault()
+    nameListRef.value?.focusInput()
   } else if (e.code === 'Space' && !isEditableTarget(e.target)) {
     e.preventDefault()
     // Don't spin underneath the winner modal or the recap reel: Space is inert
@@ -809,6 +824,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
         <div class="list-section">
           <div class="panel">
             <NameList
+              ref="nameListRef"
               :active="activeParticipants"
               :removed="removedParticipants"
               :ticking-id="tickingId"
