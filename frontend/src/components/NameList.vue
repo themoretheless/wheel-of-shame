@@ -125,6 +125,27 @@ const duplicateNames = computed(() => {
   return [...counts.values()].filter((entry) => entry.count > 1)
 })
 
+const activeDuplicateIds = computed(() => {
+  const seen = new Set<string>()
+  const duplicateIds: string[] = []
+  for (const participant of props.active) {
+    const key = participant.name.trim().toLocaleLowerCase()
+    if (!key) continue
+    if (seen.has(key)) {
+      duplicateIds.push(participant.id)
+    } else {
+      seen.add(key)
+    }
+  }
+  return duplicateIds
+})
+
+function removeActiveDuplicates() {
+  for (const id of activeDuplicateIds.value) {
+    emit('remove', id)
+  }
+}
+
 function showCopyStatus(message: string) {
   copyStatus.value = message
   clearTimeout(copyStatusTimer)
@@ -274,9 +295,18 @@ onBeforeUnmount(() => {
 
     <p v-if="copyStatus" class="copy-status" role="status">{{ copyStatus }}</p>
 
-    <p v-if="duplicateNames.length > 0" class="notice">
-      {{ duplicateNames.length }} duplicate name{{ duplicateNames.length === 1 ? '' : 's' }} in the roster
-    </p>
+    <div v-if="duplicateNames.length > 0" class="notice">
+      <span>
+        {{ duplicateNames.length }} duplicate name{{ duplicateNames.length === 1 ? '' : 's' }} in the roster
+      </span>
+      <button
+        v-if="activeDuplicateIds.length > 0"
+        class="notice-action"
+        @click="removeActiveDuplicates"
+      >
+        Remove {{ activeDuplicateIds.length }} active
+      </button>
+    </div>
 
     <div v-if="totalCount > 4" class="search-box">
       <input
@@ -669,6 +699,35 @@ h2 {
 .notice {
   background: rgba(255, 234, 167, 0.12);
   color: #ffeaa7;
+}
+
+.notice {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.notice span {
+  min-width: 0;
+}
+
+.notice-action {
+  flex: none;
+  min-height: 26px;
+  padding: 0 8px;
+  border: 1px solid rgba(255, 234, 167, 0.28);
+  border-radius: 6px;
+  background: rgba(255, 234, 167, 0.12);
+  color: #fff5bd;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.notice-action:hover {
+  background: rgba(255, 234, 167, 0.2);
 }
 
 .search-box {
