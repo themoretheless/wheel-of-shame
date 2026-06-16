@@ -370,6 +370,38 @@ function copyRosterSnapshot() {
 // --- Command palette (Cmd-K / Ctrl-K) ---
 const paletteOpen = ref(false)
 
+function parsePaletteNames(query: string): string[] {
+  const value = query.trim().replace(/^add\s+/i, '')
+  return value
+    .split(/[,;\t]+/)
+    .map((name) => name.trim())
+    .filter((name) => name.length > 0)
+}
+
+function addPaletteNames(names: string[]) {
+  if (names.length === 0) return
+  if (names.length === 1) {
+    addName(names[0])
+  } else {
+    addNames(names)
+  }
+}
+
+function paletteQueryCommand(query: string): Command | null {
+  if (!session.value) return null
+  const names = parsePaletteNames(query)
+  if (names.length === 0) return null
+  return {
+    id: `add-query-${names.join('|').toLowerCase()}`,
+    label: names.length === 1 ? `Add "${names[0]}"` : `Add ${names.length} names`,
+    subtitle: names.length === 1 ? 'Create participant from query' : names.join(', '),
+    hint: 'New participant',
+    run: () => {
+      addPaletteNames(names)
+    },
+  }
+}
+
 const paletteCommands = computed<Command[]>(() => [
   {
     id: 'spin',
@@ -382,12 +414,11 @@ const paletteCommands = computed<Command[]>(() => [
   },
   {
     id: 'add',
-    label: 'Add a name',
+    label: 'Type a name to add',
     hint: 'New participant',
     disabled: !session.value,
     run: () => {
-      const name = window.prompt('Name to add')?.trim()
-      if (name) addName(name)
+      return false
     },
   },
   {
@@ -583,6 +614,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
   <CommandPalette
     :open="paletteOpen"
     :commands="paletteCommands"
+    :query-command="paletteQueryCommand"
     @close="paletteOpen = false"
   />
 </template>

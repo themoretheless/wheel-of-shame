@@ -42,6 +42,7 @@ function fuzzyScore(text: string, query: string): number {
 const props = defineProps<{
   open: boolean
   commands: Command[]
+  queryCommand?: (query: string) => Command | null
 }>()
 
 const emit = defineEmits<{
@@ -58,7 +59,7 @@ const filtered = computed(() => {
   if (!q) return list
   // Fuzzy-match against the best of label/hint/subtitle, then rank by score so
   // the closest command floats to the top regardless of source field.
-  return list
+  const matches = list
     .map((c) => {
       const fields = [c.label, c.hint, c.subtitle].filter(Boolean) as string[]
       const score = Math.max(...fields.map((f) => fuzzyScore(f.toLowerCase(), q)))
@@ -67,6 +68,13 @@ const filtered = computed(() => {
     .filter((entry) => entry.score >= 0)
     .sort((a, b) => b.score - a.score)
     .map((entry) => entry.c)
+  const queryCommand = props.queryCommand?.(query.value.trim())
+  if (!queryCommand || queryCommand.disabled) return matches
+  const hasExactMatch = matches.some((cmd) => cmd.label.toLowerCase() === queryCommand.label.toLowerCase())
+  const explicitAdd = q.startsWith('add ')
+  if (hasExactMatch) return matches
+  if (explicitAdd || matches.length === 0) return [queryCommand, ...matches]
+  return matches
 })
 
 // Reset to a clean state and focus the input each time the palette opens.
