@@ -15,6 +15,8 @@ const props = defineProps<{
   participants: Participant[]
   spinning: boolean
   winnerId: string | null
+  soundEnabled: boolean
+  soundIntensity: number
 }>()
 
 const emit = defineEmits<{
@@ -1215,6 +1217,7 @@ defineExpose({ dismissWinner })
 // first tick — the spin is click-initiated, so the audio context is allowed to
 // start. Volume rises toward the finale for tension.
 function playTick(volume: number) {
+  if (!props.soundEnabled) return
   try {
     if (!audioCtx) {
       const Ctor = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
@@ -1229,7 +1232,8 @@ function playTick(volume: number) {
     osc.frequency.setValueAtTime(1100 + Math.random() * 300, now)
     osc.frequency.exponentialRampToValueAtTime(520, now + 0.03)
     gain.gain.setValueAtTime(0.0001, now)
-    gain.gain.exponentialRampToValueAtTime(Math.max(0.0002, volume), now + 0.004)
+    const level = Math.max(0.0002, volume * Math.max(0, Math.min(props.soundIntensity, 1.6)))
+    gain.gain.exponentialRampToValueAtTime(level, now + 0.004)
     gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.05)
     osc.connect(gain).connect(ctx.destination)
     osc.start(now)

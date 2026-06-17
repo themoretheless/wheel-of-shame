@@ -30,6 +30,10 @@ const winnerId = ref<string | null>(null)
 const wheelRef = ref<{ dismissWinner: () => void } | null>(null)
 const winnerData = ref<{ id: string; name: string; remaining: number } | null>(null)
 const copyNotice = ref('')
+const themePreset = ref<'classic' | 'arcade' | 'minimal'>('classic')
+const soundEnabled = ref(true)
+const soundIntensity = ref(1)
+const spectatorMode = ref(false)
 let copyNoticeTimer: ReturnType<typeof setTimeout> | undefined
 let isLocalSpin = false
 let pendingSpinResult: import('./types').SpinResult | null = null
@@ -260,7 +264,7 @@ async function createSession() {
 }
 
 async function handleSpin() {
-  if (spinning.value || activeParticipants.value.length === 0) return
+  if (spectatorMode.value || spinning.value || activeParticipants.value.length === 0) return
 
   isLocalSpin = true
   const result = await doSpin()
@@ -388,7 +392,7 @@ function addPaletteNames(names: string[]) {
 }
 
 function paletteQueryCommand(query: string): Command | null {
-  if (!session.value) return null
+  if (!session.value || spectatorMode.value) return null
   const names = parsePaletteNames(query)
   if (names.length === 0) return null
   return {
@@ -407,7 +411,7 @@ const paletteCommands = computed<Command[]>(() => [
     id: 'spin',
     label: 'Spin the wheel',
     hint: 'Spin',
-    disabled: spinning.value || activeParticipants.value.length === 0,
+    disabled: spectatorMode.value || spinning.value || activeParticipants.value.length === 0,
     run: () => {
       handleSpin()
     },
@@ -416,7 +420,7 @@ const paletteCommands = computed<Command[]>(() => [
     id: 'add',
     label: 'Type a name to add',
     hint: 'New participant',
-    disabled: !session.value,
+    disabled: !session.value || spectatorMode.value,
     run: () => {
       return false
     },
@@ -425,7 +429,7 @@ const paletteCommands = computed<Command[]>(() => [
     id: 'reset',
     label: 'Reset the wheel',
     hint: 'Restore everyone',
-    disabled: !session.value || removedParticipants.value.length === 0,
+    disabled: !session.value || spectatorMode.value || removedParticipants.value.length === 0,
     run: () => {
       reset()
     },
@@ -475,6 +479,7 @@ const paletteCommands = computed<Command[]>(() => [
       label: `Eliminate ${p.name}`,
       subtitle: `${odds}% to be picked next`,
       hint: 'Remove',
+      disabled: spectatorMode.value,
       run: () => {
         removeName(p.id)
       },
@@ -519,6 +524,8 @@ function onGlobalKeydown(e: KeyboardEvent) {
     :participants="activeParticipants"
     :spinning="spinning"
     :winner-id="winnerId"
+    :sound-enabled="soundEnabled"
+    :sound-intensity="soundIntensity"
     @spin-complete="onSpinComplete"
     @spin-click="handleSpin"
     @winner-reveal="onWinnerReveal"
@@ -588,10 +595,18 @@ function onGlobalKeydown(e: KeyboardEvent) {
             <NameList
               :active="activeParticipants"
               :removed="removedParticipants"
+              :sound-enabled="soundEnabled"
+              :sound-intensity="soundIntensity"
+              :theme-preset="themePreset"
+              :spectator-mode="spectatorMode"
               @add="addName"
               @add-batch="addNames"
               @remove="removeName"
               @reset="reset"
+              @update:sound-enabled="soundEnabled = $event"
+              @update:sound-intensity="soundIntensity = $event"
+              @update:theme-preset="themePreset = $event"
+              @update:spectator-mode="spectatorMode = $event"
             />
           </div>
         </div>

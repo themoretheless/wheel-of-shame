@@ -11,6 +11,10 @@ function initialOf(name: string): string {
 const props = defineProps<{
   active: Participant[]
   removed: Participant[]
+  soundEnabled: boolean
+  soundIntensity: number
+  themePreset: 'classic' | 'arcade' | 'minimal'
+  spectatorMode: boolean
 }>()
 
 const emit = defineEmits<{
@@ -18,6 +22,10 @@ const emit = defineEmits<{
   (e: 'add-batch', names: string[]): void
   (e: 'remove', id: string): void
   (e: 'reset'): void
+  (e: 'update:sound-enabled', value: boolean): void
+  (e: 'update:sound-intensity', value: number): void
+  (e: 'update:theme-preset', value: 'classic' | 'arcade' | 'minimal'): void
+  (e: 'update:spectator-mode', value: boolean): void
 }>()
 
 const nameInput = ref('')
@@ -28,6 +36,10 @@ const copyStatus = ref('')
 const viewMode = ref<'all' | 'active' | 'picked'>('all')
 const sortMode = ref<'added' | 'name'>('added')
 const compactRows = ref(false)
+const pinnedIds = ref<Set<string>>(new Set())
+const weights = ref<Record<string, number>>({})
+const historyReplay = ref<{ name: string; order: number | string } | null>(null)
+const undoAction = ref<{ label: string; names: string[]; replaceActive: boolean } | null>(null)
 let copyStatusTimer: ReturnType<typeof setTimeout> | undefined
 
 function parseNames(value: string): string[] {
@@ -63,6 +75,9 @@ function addName() {
 }
 
 const parsedBulkNames = computed(() => uniqueInOrder(parseNames(bulkText.value)))
+const rawBulkNames = computed(() => parseNames(bulkText.value))
+const bulkDuplicateCount = computed(() => rawBulkNames.value.length - parsedBulkNames.value.length)
+const bulkPreviewNames = computed(() => parsedBulkNames.value.slice(0, 8))
 
 function importBulk() {
   submitNames(parsedBulkNames.value)
@@ -70,6 +85,34 @@ function importBulk() {
     bulkText.value = ''
     bulkOpen.value = false
   }
+}
+
+function titleCaseName(name: string): string {
+  return name
+    .trim()
+    .toLocaleLowerCase()
+    .replace(/\b\p{L}/gu, (letter) => letter.toLocaleUpperCase())
+}
+
+const normalizedActiveNames = computed(() =>
+  props.active.map((participant) => titleCaseName(participant.name)),
+)
+
+const canNormalizeActive = computed(() =>
+  props.active.some((participant, index) => participant.name !== normalizedActiveNames.value[index]),
+)
+
+function normalizeActiveNames() {
+  if (props.spectatorMode || !canNormalizeActive.value) return
+  undoAction.value = {
+    label: 'Undo normalize',
+    names: props.active.map((participant) => participant.name),
+    replaceActive: true,
+  }
+  for (const participant of props.active) {
+    emit('remove', participant.id)
+  }
+  submitNames(uniqueInOrder(normalizedActiveNames.value))
 }
 
 const totalCount = computed(() => props.active.length + props.removed.length)
@@ -140,9 +183,81 @@ const activeDuplicateIds = computed(() => {
   return duplicateIds
 })
 
+const activeDuplicateNames = computed(() =>
+  props.active
+    .filter((participant) => activeDuplicateIds.value.includes(participant.id))
+    .map((participant) => participant.name),
+)
+
 function removeActiveDuplicates() {
+  if (props.spectatorMode || activeDuplicateIds.value.length === 0) return
+  undoAction.value = {
+    label: 'Undo cleanup',
+    names: activeDuplicateNames.value,
+    replaceActive: false,
+  }
   for (const id of activeDuplicateIds.value) {
     emit('remove', id)
+  }
+}
+
+function runUndoAction() {
+  const action = undoAction.value
+  if (props.spectatorMode || !action) return
+  if (action.replaceActive) {
+    for (const participant of props.active) {
+      emit('remove', participant.id)
+    }
+  }
+  submitNames(action.names)
+  undoAction.value = null
+}
+
+function togglePin(id: string) {
+  if (props.spectatorMode) return
+  const next = new Set(pinnedIds.value)
+  if (next.has(id)) {
+    next.delete(id)
+  } else {
+    next.add(id)
+  }
+  pinnedIds.value = next
+}
+
+function isPinned(id: string): boolean {
+  return pinnedIds.value.has(id)
+}
+
+function weightOf(id: string): number {
+  return weights.value[id] ?? 1
+}
+
+function setWeight(id: string, value: number) {
+  if (props.spectatorMode) return
+  weights.value = {
+    ...weights.value,
+    [id]: Math.max(1, Math.min(5, value)),
+  }
+}
+
+function copyReport() {
+  const active = props.active
+    .map((participant) => {
+      const pin = isPinned(participant.id) ? ' pinned' : ''
+      const weight = weightOf(participant.id)
+      return `- ${participant.name}${pin}${weight > 1 ? ` x${weight}` : ''}`
+    })
+    .join('\n') || '- none'
+  const picked = props.removed
+    .map((participant, index) => `${participant.spin_order ?? index + 1}. ${participant.name}`)
+    .join('\n') || 'none'
+  void copyText(`Wheel report\n\nActive\n${active}\n\nPicked\n${picked}`, 'Report copied')
+}
+
+function replayPicked(participant: Participant, index: number) {
+  historyReplay.value = {
+    name: participant.name,
+    order: participant.spin_order ?? index + 1,
   }
 }
 
@@ -190,7 +305,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="name-list" :class="{ compact: compactRows }">
+  <div class="name-list" :class="[`theme-${themePreset}`, { compact: compactRows }]">
     <div class="roster-top">
       <div>
         <span class="panel-kicker">Roster</span>
@@ -253,20 +368,67 @@ onBeforeUnmount(() => {
       </label>
     </div>
 
+    <div class="lab-controls">
+      <label class="sort-control">
+        <span>Theme</span>
+        <select
+          :value="themePreset"
+          @change="emit('update:theme-preset', ($event.target as HTMLSelectElement).value as 'classic' | 'arcade' | 'minimal')"
+        >
+          <option value="classic">Classic</option>
+          <option value="arcade">Arcade</option>
+          <option value="minimal">Minimal</option>
+        </select>
+      </label>
+      <label class="compact-toggle">
+        <input
+          :checked="spectatorMode"
+          type="checkbox"
+          @change="emit('update:spectator-mode', ($event.target as HTMLInputElement).checked)"
+        />
+        <span class="toggle-box" aria-hidden="true"></span>
+        <span>Spectator</span>
+      </label>
+    </div>
+
+    <div class="sound-row">
+      <label class="compact-toggle">
+        <input
+          :checked="soundEnabled"
+          type="checkbox"
+          @change="emit('update:sound-enabled', ($event.target as HTMLInputElement).checked)"
+        />
+        <span class="toggle-box" aria-hidden="true"></span>
+        <span>Sound</span>
+      </label>
+      <input
+        class="sound-slider"
+        :value="soundIntensity"
+        type="range"
+        min="0.2"
+        max="1.6"
+        step="0.1"
+        :disabled="!soundEnabled"
+        @input="emit('update:sound-intensity', Number(($event.target as HTMLInputElement).value))"
+      />
+    </div>
+
     <div class="input-group">
       <input
         v-model="nameInput"
         @keyup.enter="addName"
         placeholder="Name, comma list, or pasted rows"
         class="name-input"
+        :disabled="spectatorMode"
       />
-      <button @click="addName" class="btn btn-add">Add</button>
+      <button @click="addName" class="btn btn-add" :disabled="spectatorMode">Add</button>
     </div>
 
     <div class="tool-row">
       <button
         class="btn btn-ghost"
         :class="{ active: bulkOpen }"
+        :disabled="spectatorMode"
         @click="bulkOpen = !bulkOpen"
       >
         Bulk
@@ -277,6 +439,16 @@ onBeforeUnmount(() => {
       <button class="btn btn-ghost" :disabled="removed.length === 0" @click="copyPickedNames">
         Copy picked
       </button>
+      <button class="btn btn-ghost" :disabled="active.length === 0" @click="copyReport">
+        Report
+      </button>
+      <button
+        class="btn btn-ghost"
+        :disabled="spectatorMode || !canNormalizeActive"
+        @click="normalizeActiveNames"
+      >
+        Normalize
+      </button>
     </div>
 
     <div v-if="bulkOpen" class="bulk-editor">
@@ -284,16 +456,31 @@ onBeforeUnmount(() => {
         v-model="bulkText"
         placeholder="Paste one name per line, or separate with commas"
         rows="4"
+        :disabled="spectatorMode"
       ></textarea>
       <div class="bulk-footer">
-        <span>{{ parsedBulkNames.length }} ready</span>
-        <button class="btn btn-add btn-compact" :disabled="parsedBulkNames.length === 0" @click="importBulk">
+        <span>{{ parsedBulkNames.length }} ready<span v-if="bulkDuplicateCount > 0">, {{ bulkDuplicateCount }} duplicate</span></span>
+        <button
+          class="btn btn-add btn-compact"
+          :disabled="spectatorMode || parsedBulkNames.length === 0"
+          @click="importBulk"
+        >
           Import
         </button>
+      </div>
+      <div v-if="bulkPreviewNames.length > 0" class="bulk-preview">
+        <span v-for="name in bulkPreviewNames" :key="name">{{ name }}</span>
       </div>
     </div>
 
     <p v-if="copyStatus" class="copy-status" role="status">{{ copyStatus }}</p>
+
+    <div v-if="undoAction" class="copy-status undo-status" role="status">
+      <span>{{ undoAction.label }} ready</span>
+      <button class="notice-action" :disabled="spectatorMode" @click="runUndoAction">
+        {{ undoAction.label }}
+      </button>
+    </div>
 
     <div v-if="duplicateNames.length > 0" class="notice">
       <span>
@@ -302,6 +489,7 @@ onBeforeUnmount(() => {
       <button
         v-if="activeDuplicateIds.length > 0"
         class="notice-action"
+        :disabled="spectatorMode"
         @click="removeActiveDuplicates"
       >
         Remove {{ activeDuplicateIds.length }} active
@@ -335,7 +523,7 @@ onBeforeUnmount(() => {
           v-for="p in activeFiltered"
           :key="p.id"
           class="participant-item"
-          :class="{ pending: p.pending, error: p.error }"
+          :class="{ pending: p.pending, error: p.error, pinned: isPinned(p.id) }"
         >
           <span class="name-cell">
             <span class="identity-token" :style="{ background: identityColor(p.name) }">{{
@@ -343,12 +531,41 @@ onBeforeUnmount(() => {
             }}</span>
             <span class="name-text">{{ p.name }}</span>
           </span>
+          <span class="row-tools">
+            <button
+              class="mini-btn"
+              :class="{ active: isPinned(p.id) }"
+              :title="isPinned(p.id) ? 'Unpin' : 'Pin'"
+              :disabled="spectatorMode"
+              @click="togglePin(p.id)"
+            >
+              Pin
+            </button>
+            <button
+              class="mini-btn"
+              title="Decrease weight"
+              :disabled="spectatorMode || weightOf(p.id) <= 1"
+              @click="setWeight(p.id, weightOf(p.id) - 1)"
+            >
+              -
+            </button>
+            <span class="weight-pill">x{{ weightOf(p.id) }}</span>
+            <button
+              class="mini-btn"
+              title="Increase weight"
+              :disabled="spectatorMode || weightOf(p.id) >= 5"
+              @click="setWeight(p.id, weightOf(p.id) + 1)"
+            >
+              +
+            </button>
+          </span>
           <button
             v-if="!p.pending"
             @click="emit('remove', p.id)"
             class="btn btn-remove"
             title="Remove"
             :aria-label="`Remove ${p.name}`"
+            :disabled="spectatorMode || isPinned(p.id)"
           >
             &times;
           </button>
@@ -370,13 +587,17 @@ onBeforeUnmount(() => {
             }}</span>
             <span class="name-text">#{{ p.spin_order ?? index + 1 }} - {{ p.name }}</span>
           </span>
+          <button class="mini-btn" @click="replayPicked(p, index)">Replay</button>
         </li>
       </ol>
       <p v-else class="empty">{{ removed.length === 0 ? 'No picks yet' : 'No picked matches' }}</p>
+      <p v-if="historyReplay" class="copy-status replay-status">
+        Replay #{{ historyReplay.order }}: {{ historyReplay.name }}
+      </p>
       <button
         @click="emit('reset')"
         class="btn btn-reset"
-        :disabled="removed.length === 0"
+        :disabled="spectatorMode || removed.length === 0"
       >
         Reset All
       </button>
@@ -391,7 +612,34 @@ onBeforeUnmount(() => {
 <style scoped>
 .name-list {
   width: 100%;
+  --accent: #4ecdc4;
+  --accent-hover: #66ded6;
+  --accent-contrast: #162326;
+  --accent-soft: rgba(78, 205, 196, 0.14);
+  --accent-border: rgba(78, 205, 196, 0.38);
+  --accent-ring: rgba(78, 205, 196, 0.16);
+  --accent-text: #7ff5ec;
   color: #edf3f4;
+}
+
+.name-list.theme-arcade {
+  --accent: #ff5c8a;
+  --accent-hover: #ff7ba2;
+  --accent-contrast: #210b14;
+  --accent-soft: rgba(255, 92, 138, 0.15);
+  --accent-border: rgba(255, 92, 138, 0.42);
+  --accent-ring: rgba(255, 92, 138, 0.18);
+  --accent-text: #ffc0d2;
+}
+
+.name-list.theme-minimal {
+  --accent: #dfe6e9;
+  --accent-hover: #ffffff;
+  --accent-contrast: #111719;
+  --accent-soft: rgba(223, 230, 233, 0.11);
+  --accent-border: rgba(223, 230, 233, 0.28);
+  --accent-ring: rgba(223, 230, 233, 0.14);
+  --accent-text: #ffffff;
 }
 
 .roster-top {
@@ -422,15 +670,15 @@ h2 {
 .odds-pill {
   min-width: 82px;
   padding: 8px 10px;
-  border: 1px solid rgba(78, 205, 196, 0.26);
+  border: 1px solid var(--accent-border);
   border-radius: 8px;
-  background: rgba(78, 205, 196, 0.11);
+  background: var(--accent-soft);
   text-align: right;
 }
 
 .odds-pill strong {
   display: block;
-  color: #4ecdc4;
+  color: var(--accent);
   font-size: 18px;
   line-height: 1;
 }
@@ -489,7 +737,7 @@ h2 {
 
 .seg-btn:hover,
 .seg-btn.active {
-  background: rgba(78, 205, 196, 0.14);
+  background: var(--accent-soft);
   color: #ffffff;
 }
 
@@ -499,6 +747,14 @@ h2 {
   gap: 8px;
   align-items: center;
   margin-bottom: 12px;
+}
+
+.lab-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
 }
 
 .sort-control {
@@ -524,9 +780,9 @@ h2 {
 }
 
 .sort-control select:focus {
-  border-color: #4ecdc4;
+  border-color: var(--accent);
   outline: none;
-  box-shadow: 0 0 0 3px rgba(78, 205, 196, 0.16);
+  box-shadow: 0 0 0 3px var(--accent-ring);
 }
 
 .compact-toggle {
@@ -562,8 +818,8 @@ h2 {
 }
 
 .compact-toggle input:checked + .toggle-box {
-  border-color: rgba(78, 205, 196, 0.7);
-  background: #4ecdc4;
+  border-color: var(--accent-border);
+  background: var(--accent);
 }
 
 .compact-toggle input:checked + .toggle-box::after {
@@ -572,13 +828,30 @@ h2 {
   width: 7px;
   height: 4px;
   margin: 3px 0 0 3px;
-  border: solid #162326;
+  border: solid var(--accent-contrast);
   border-width: 0 0 2px 2px;
   transform: rotate(-45deg);
 }
 
 .compact-toggle input:focus-visible + .toggle-box {
-  box-shadow: 0 0 0 3px rgba(78, 205, 196, 0.18);
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+
+.sound-row {
+  display: grid;
+  grid-template-columns: auto minmax(90px, 1fr);
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.sound-slider {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.sound-slider:disabled {
+  opacity: 0.45;
 }
 
 .input-group {
@@ -608,9 +881,9 @@ h2 {
 .name-input:focus,
 .search-input:focus,
 .bulk-editor textarea:focus {
-  border-color: #4ecdc4;
+  border-color: var(--accent);
   outline: none;
-  box-shadow: 0 0 0 3px rgba(78, 205, 196, 0.16);
+  box-shadow: 0 0 0 3px var(--accent-ring);
 }
 
 .btn {
@@ -629,12 +902,12 @@ h2 {
 
 .btn-add {
   padding: 10px 15px;
-  background: #4ecdc4;
-  color: #162326;
+  background: var(--accent);
+  color: var(--accent-contrast);
 }
 
 .btn-add:hover:not(:disabled) {
-  background: #66ded6;
+  background: var(--accent-hover);
 }
 
 .btn-compact {
@@ -657,8 +930,8 @@ h2 {
 
 .btn-ghost:hover:not(:disabled),
 .btn-ghost.active {
-  border-color: rgba(78, 205, 196, 0.38);
-  background: rgba(78, 205, 196, 0.14);
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
   color: #ffffff;
 }
 
@@ -683,6 +956,26 @@ h2 {
   font-size: 12px;
 }
 
+.bulk-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+.bulk-preview span {
+  max-width: 100%;
+  overflow: hidden;
+  padding: 4px 7px;
+  border: 1px solid var(--accent-border);
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .copy-status,
 .notice {
   margin: 0 0 10px;
@@ -692,8 +985,15 @@ h2 {
 }
 
 .copy-status {
-  background: rgba(78, 205, 196, 0.14);
-  color: #7ff5ec;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.undo-status {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
 }
 
 .notice {
@@ -728,6 +1028,11 @@ h2 {
 
 .notice-action:hover {
   background: rgba(255, 234, 167, 0.2);
+}
+
+.notice-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .search-box {
@@ -807,10 +1112,18 @@ ol {
   background: rgba(255, 255, 255, 0.055);
 }
 
+.participant-item.pinned {
+  border-color: var(--accent-border);
+  background:
+    linear-gradient(90deg, var(--accent-soft), rgba(255, 255, 255, 0.055) 42%),
+    rgba(255, 255, 255, 0.055);
+}
+
 .name-cell {
   display: flex;
   align-items: center;
   gap: 9px;
+  flex: 1 1 auto;
   min-width: 0;
 }
 
@@ -843,6 +1156,51 @@ ol {
 
 .participant-item.picked .name-text {
   text-decoration: line-through;
+}
+
+.row-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
+.mini-btn {
+  min-width: 26px;
+  min-height: 26px;
+  padding: 0 7px;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.055);
+  color: #dfe6e9;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.mini-btn:hover:not(:disabled),
+.mini-btn.active {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+  color: #ffffff;
+}
+
+.mini-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.weight-pill {
+  min-width: 30px;
+  padding: 4px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  background: rgba(12, 16, 18, 0.52);
+  color: #aab7ba;
+  font-size: 11px;
+  font-weight: 800;
+  text-align: center;
 }
 
 .name-list.compact .participant-item {
@@ -894,6 +1252,11 @@ ol {
   background: rgba(231, 76, 60, 0.15);
 }
 
+.btn-remove:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
 @keyframes chip-pulse {
   0%,
   100% {
@@ -933,6 +1296,10 @@ ol {
 .removed-list {
   padding-top: 14px;
   border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.replay-status {
+  margin-top: 8px;
 }
 
 .btn-reset {
