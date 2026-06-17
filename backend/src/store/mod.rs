@@ -9,6 +9,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use rand::RngExt;
 
 use crate::error::AppError;
 use crate::models::{Participant, Session, SpinResult};
@@ -51,12 +52,41 @@ pub trait Store: Send + Sync {
         session_id: &str,
         participant_id: &str,
     ) -> Result<(), AppError>;
+    async fn update_participant(
+        &self,
+        session_id: &str,
+        participant_id: &str,
+        pinned: Option<bool>,
+        weight: Option<u32>,
+    ) -> Result<Participant, AppError>;
     /// Pick a random active participant, mark it removed and return it
     /// together with the number of remaining active participants.
     async fn spin(&self, session_id: &str) -> Result<SpinResult, AppError>;
     /// Restore all participants of a session to the active state.
     /// Returns the restored participant list.
     async fn reset_session(&self, session_id: &str) -> Result<Vec<Participant>, AppError>;
+}
+
+pub(crate) fn choose_weighted_active_index(parts: &[Participant]) -> Option<usize> {
+    let active: Vec<(usize, u32)> = parts
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| !p.removed)
+        .map(|(idx, p)| (idx, p.effective_weight()))
+        .collect();
+    let total_weight: u32 = active.iter().map(|(_, weight)| *weight).sum();
+    if total_weight == 0 {
+        return None;
+    }
+
+    let mut ticket = rand::rng().random_range(0..total_weight);
+    for (idx, weight) in active {
+        if ticket < weight {
+            return Some(idx);
+        }
+        ticket -= weight;
+    }
+    None
 }
 
 /// Runtime-selected storage backend shared across the app.
@@ -104,8 +134,7 @@ pub async fn build_store_from_env() -> Result<DynStore, AppError> {
         None => {
             if std::env::var("YDB_CONNECTION_STRING").is_ok() {
                 build_ydb().await
-            } else if std::env::var("DATABASE_URL").is_ok()
-                || std::env::var("SQLITE_PATH").is_ok()
+            } else if std::env::var("DATABASE_URL").is_ok() || std::env::var("SQLITE_PATH").is_ok()
             {
                 build_sqlite().await
             } else {
@@ -120,7 +149,11 @@ pub async fn build_store_from_env() -> Result<DynStore, AppError> {
 async fn build_sqlite() -> Result<DynStore, AppError> {
     let url = std::env::var("DATABASE_URL")
         .ok()
-        .or_else(|| std::env::var("SQLITE_PATH").ok().map(|p| format!("sqlite://{p}")))
+        .or_else(|| {
+            std::env::var("SQLITE_PATH")
+                .ok()
+                .map(|p| format!("sqlite://{p}"))
+        })
         .unwrap_or_else(|| "sqlite://wheel.db".to_string());
     tracing::info!("storage: sqlite ({url})");
     Ok(Arc::new(SqliteStore::connect(&url).await?))
@@ -135,9 +168,8 @@ async fn build_sqlite() -> Result<DynStore, AppError> {
 
 #[cfg(feature = "ydb")]
 async fn build_ydb() -> Result<DynStore, AppError> {
-    let connection_string = std::env::var("YDB_CONNECTION_STRING").map_err(|_| {
-        AppError::Internal("ydb backend requires YDB_CONNECTION_STRING".into())
-    })?;
+    let connection_string = std::env::var("YDB_CONNECTION_STRING")
+        .map_err(|_| AppError::Internal("ydb backend requires YDB_CONNECTION_STRING".into()))?;
     tracing::warn!("storage: YDB (experimental), connecting via YDB_CONNECTION_STRING");
     Ok(Arc::new(YdbStore::connect(&connection_string).await?))
 }

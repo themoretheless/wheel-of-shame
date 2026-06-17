@@ -127,6 +127,15 @@ ws.onMessage((event: any) => {
       )
       break
     }
+    case 'participant_updated': {
+      const idx = participants.value.findIndex((p) => p.id === event.participant.id)
+      if (idx !== -1) {
+        participants.value[idx] = event.participant
+      } else {
+        participants.value.push(event.participant)
+      }
+      break
+    }
     case 'spin_result': {
       if (suppressWsSpin) {
         // Own spin — don't update state, animation handles it
@@ -208,6 +217,8 @@ export function useSession() {
       session_id: session.value.id,
       name,
       removed: false,
+      pinned: false,
+      weight: 1,
       pending: true,
     }
     participants.value.push(temp)
@@ -272,6 +283,33 @@ export function useSession() {
     }
   }
 
+  async function updateParticipant(
+    participantId: string,
+    patch: { pinned?: boolean; weight?: number },
+  ) {
+    if (!session.value) return
+    error.value = null
+    const idx = participants.value.findIndex((p) => p.id === participantId)
+    const previous = idx === -1 ? null : { ...participants.value[idx] }
+    if (idx !== -1) {
+      participants.value[idx] = { ...participants.value[idx], ...patch }
+    }
+    try {
+      const participant = await api.updateParticipant(session.value.id, participantId, patch)
+      const nextIdx = participants.value.findIndex((p) => p.id === participant.id)
+      if (nextIdx !== -1) {
+        participants.value[nextIdx] = participant
+      } else {
+        participants.value.push(participant)
+      }
+    } catch (e: any) {
+      error.value = e.message
+      if (idx !== -1 && previous) {
+        participants.value[idx] = previous
+      }
+    }
+  }
+
   async function doSpin(): Promise<SpinResult | null> {
     if (!session.value) return null
     error.value = null
@@ -324,6 +362,7 @@ export function useSession() {
     addName,
     addNames,
     removeName,
+    updateParticipant,
     doSpin,
     applySpinResult,
     reset,

@@ -2,6 +2,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub const MIN_PARTICIPANT_WEIGHT: u32 = 1;
+pub const MAX_PARTICIPANT_WEIGHT: u32 = 5;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
@@ -19,6 +22,8 @@ pub struct Participant {
     pub removed_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spin_order: Option<u32>,
+    pub pinned: bool,
+    pub weight: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -34,6 +39,12 @@ pub struct AddParticipantRequest {
 #[derive(Debug, Deserialize)]
 pub struct AddParticipantsBatchRequest {
     pub names: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateParticipantRequest {
+    pub pinned: Option<bool>,
+    pub weight: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -61,6 +72,13 @@ impl Participant {
             removed: false,
             removed_at: None,
             spin_order: None,
+            pinned: false,
+            weight: MIN_PARTICIPANT_WEIGHT,
         }
+    }
+
+    pub fn effective_weight(&self) -> u32 {
+        self.weight
+            .clamp(MIN_PARTICIPANT_WEIGHT, MAX_PARTICIPANT_WEIGHT)
     }
 }

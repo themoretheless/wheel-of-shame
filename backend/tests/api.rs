@@ -5,8 +5,8 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-use wheel_of_shame::store::AppState;
 use wheel_of_shame::routes::create_router;
+use wheel_of_shame::store::AppState;
 
 fn app() -> Router {
     create_router(AppState::in_memory())
@@ -37,7 +37,13 @@ async fn send(app: &Router, method: &str, path: &str, body: Option<Value>) -> (S
 }
 
 async fn create_session(app: &Router, title: &str) -> String {
-    let (status, body) = send(app, "POST", "/api/v1/sessions", Some(json!({ "title": title }))).await;
+    let (status, body) = send(
+        app,
+        "POST",
+        "/api/v1/sessions",
+        Some(json!({ "title": title })),
+    )
+    .await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(body["title"], title);
     body["id"].as_str().unwrap().to_string()
@@ -64,7 +70,13 @@ async fn create_session_returns_session() {
 #[tokio::test]
 async fn create_session_rejects_empty_title() {
     let app = app();
-    let (status, body) = send(&app, "POST", "/api/v1/sessions", Some(json!({ "title": "  " }))).await;
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/v1/sessions",
+        Some(json!({ "title": "  " })),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].is_string());
 }
@@ -73,15 +85,25 @@ async fn create_session_rejects_empty_title() {
 async fn create_session_rejects_overlong_title() {
     let app = app();
     let title = "x".repeat(201);
-    let (status, body) =
-        send(&app, "POST", "/api/v1/sessions", Some(json!({ "title": title }))).await;
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/v1/sessions",
+        Some(json!({ "title": title })),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].is_string());
 
     // The boundary length must still be accepted.
     let title = "y".repeat(200);
-    let (status, _) =
-        send(&app, "POST", "/api/v1/sessions", Some(json!({ "title": title }))).await;
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/api/v1/sessions",
+        Some(json!({ "title": title })),
+    )
+    .await;
     assert_eq!(status, StatusCode::CREATED);
 }
 
@@ -307,4 +329,53 @@ async fn delete_participant_removes_it() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn update_participant_settings() {
+    let app = app();
+    let id = create_session(&app, "Demo").await;
+    let (_, body) = send(
+        &app,
+        "POST",
+        &format!("/api/v1/sessions/{id}/participants"),
+        Some(json!({ "name": "Alice" })),
+    )
+    .await;
+    let pid = body["id"].as_str().unwrap().to_string();
+
+    let (status, body) = send(
+        &app,
+        "PATCH",
+        &format!("/api/v1/sessions/{id}/participants/{pid}"),
+        Some(json!({ "pinned": true, "weight": 4 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["pinned"], true);
+    assert_eq!(body["weight"], 4);
+
+    let parts = get_participants(&app, &id).await;
+    assert_eq!(parts[0]["pinned"], true);
+    assert_eq!(parts[0]["weight"], 4);
+
+    let (status, body) = send(
+        &app,
+        "PATCH",
+        &format!("/api/v1/sessions/{id}/participants/{pid}"),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].is_string());
+
+    let (status, body) = send(
+        &app,
+        "PATCH",
+        &format!("/api/v1/sessions/{id}/participants/{pid}"),
+        Some(json!({ "weight": 6 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].is_string());
 }

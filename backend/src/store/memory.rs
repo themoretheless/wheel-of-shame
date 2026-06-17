@@ -4,13 +4,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rand::prelude::IndexedRandom;
 use tokio::sync::RwLock;
 
 use crate::error::AppError;
 use crate::models::{Participant, Session, SpinResult};
 
-use super::Store;
+use super::{choose_weighted_active_index, Store};
 
 /// In-memory storage. State is lost on restart and not shared across
 /// processes; intended for local development and tests.
@@ -86,26 +85,43 @@ impl Store for MemoryStore {
         Ok(())
     }
 
+    async fn update_participant(
+        &self,
+        session_id: &str,
+        participant_id: &str,
+        pinned: Option<bool>,
+        weight: Option<u32>,
+    ) -> Result<Participant, AppError> {
+        let mut participants = self.participants.write().await;
+        let parts = participants
+            .get_mut(session_id)
+            .ok_or_else(|| AppError::NotFound("Session not found".into()))?;
+
+        let participant = parts
+            .iter_mut()
+            .find(|p| p.id == participant_id)
+            .ok_or_else(|| AppError::NotFound("Participant not found".into()))?;
+
+        if let Some(pinned) = pinned {
+            participant.pinned = pinned;
+        }
+        if let Some(weight) = weight {
+            participant.weight = weight;
+        }
+
+        Ok(participant.clone())
+    }
+
     async fn spin(&self, session_id: &str) -> Result<SpinResult, AppError> {
         let mut participants = self.participants.write().await;
         let parts = participants
             .get_mut(session_id)
             .ok_or_else(|| AppError::NotFound("Session not found".into()))?;
 
-        let active: Vec<usize> = parts
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| !p.removed)
-            .map(|(i, _)| i)
-            .collect();
-
-        if active.is_empty() {
-            return Err(AppError::NoParticipantsLeft);
-        }
+        let picked_idx = choose_weighted_active_index(parts).ok_or(AppError::NoParticipantsLeft)?;
 
         let spin_order = parts.iter().filter(|p| p.removed).count() as u32 + 1;
 
-        let picked_idx = *active.choose(&mut rand::rng()).unwrap();
         parts[picked_idx].removed = true;
         parts[picked_idx].removed_at = Some(chrono::Utc::now());
         parts[picked_idx].spin_order = Some(spin_order);

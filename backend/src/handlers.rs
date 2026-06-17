@@ -4,9 +4,9 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 
-use crate::store::AppState;
 use crate::error::AppError;
 use crate::models::*;
+use crate::store::AppState;
 use crate::ws::SessionEvent;
 
 /// Maximum length, in characters, of a session title.
@@ -170,6 +170,42 @@ pub async fn delete_participant(
         .await;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn update_participant(
+    State(state): State<AppState>,
+    Path((session_id, participant_id)): Path<(String, String)>,
+    Json(req): Json<UpdateParticipantRequest>,
+) -> Result<Json<Participant>, AppError> {
+    if req.pinned.is_none() && req.weight.is_none() {
+        return Err(AppError::BadRequest(
+            "At least one participant setting is required".into(),
+        ));
+    }
+    if let Some(weight) = req.weight {
+        if !(MIN_PARTICIPANT_WEIGHT..=MAX_PARTICIPANT_WEIGHT).contains(&weight) {
+            return Err(AppError::BadRequest(format!(
+                "Weight must be between {MIN_PARTICIPANT_WEIGHT} and {MAX_PARTICIPANT_WEIGHT}"
+            )));
+        }
+    }
+
+    let participant = state
+        .store
+        .update_participant(&session_id, &participant_id, req.pinned, req.weight)
+        .await?;
+
+    state
+        .hub
+        .broadcast(
+            &session_id,
+            SessionEvent::ParticipantUpdated {
+                participant: participant.clone(),
+            },
+        )
+        .await;
+
+    Ok(Json(participant))
 }
 
 pub async fn spin(

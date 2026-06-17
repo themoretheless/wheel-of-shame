@@ -11,6 +11,8 @@ export interface Participant {
   removed: boolean
   removed_at?: string
   spin_order?: number
+  pinned: boolean
+  weight: number
   // Client-only transient flags for optimistic add (Linear-style). `pending`
   // marks a temp row awaiting server confirmation; `error` marks one whose
   // POST failed and is about to be removed. Never sent by or to the server.

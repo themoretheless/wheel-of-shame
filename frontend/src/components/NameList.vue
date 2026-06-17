@@ -21,6 +21,7 @@ const emit = defineEmits<{
   (e: 'add', name: string): void
   (e: 'add-batch', names: string[]): void
   (e: 'remove', id: string): void
+  (e: 'update-participant', id: string, patch: { pinned?: boolean; weight?: number }): void
   (e: 'reset'): void
   (e: 'update:sound-enabled', value: boolean): void
   (e: 'update:sound-intensity', value: number): void
@@ -36,8 +37,6 @@ const copyStatus = ref('')
 const viewMode = ref<'all' | 'active' | 'picked'>('all')
 const sortMode = ref<'added' | 'name'>('added')
 const compactRows = ref(false)
-const pinnedIds = ref<Set<string>>(new Set())
-const weights = ref<Record<string, number>>({})
 const historyReplay = ref<{ name: string; order: number | string } | null>(null)
 const undoAction = ref<{ label: string; names: string[]; replaceActive: boolean } | null>(null)
 let copyStatusTimer: ReturnType<typeof setTimeout> | undefined
@@ -99,6 +98,7 @@ const normalizedActiveNames = computed(() =>
 )
 
 const canNormalizeActive = computed(() =>
+  !props.active.some((participant) => participant.pinned) &&
   props.active.some((participant, index) => participant.name !== normalizedActiveNames.value[index]),
 )
 
@@ -116,11 +116,26 @@ function normalizeActiveNames() {
 }
 
 const totalCount = computed(() => props.active.length + props.removed.length)
+function weightOf(participant: Participant): number {
+  return participant.weight ?? 1
+}
+
+const totalWeight = computed(() =>
+  props.active.reduce((sum, participant) => sum + weightOf(participant), 0),
+)
+
 const nextOdds = computed(() => {
   if (props.active.length === 0) return '0%'
+  if (props.active.some((participant) => weightOf(participant) !== 1)) {
+    return `${totalWeight.value} tickets`
+  }
   const odds = 100 / props.active.length
   return `${odds >= 10 ? Math.round(odds) : odds.toFixed(1)}%`
 })
+
+const nextOddsLabel = computed(() =>
+  props.active.some((participant) => weightOf(participant) !== 1) ? 'weighted pool' : 'next odds',
+)
 
 function participantMatches(p: Participant): boolean {
   const q = searchQuery.value.trim().toLocaleLowerCase()
@@ -175,7 +190,7 @@ const activeDuplicateIds = computed(() => {
     const key = participant.name.trim().toLocaleLowerCase()
     if (!key) continue
     if (seen.has(key)) {
-      duplicateIds.push(participant.id)
+      if (!participant.pinned) duplicateIds.push(participant.id)
     } else {
       seen.add(key)
     }
@@ -213,38 +228,21 @@ function runUndoAction() {
   undoAction.value = null
 }
 
-function togglePin(id: string) {
+function togglePin(participant: Participant) {
   if (props.spectatorMode) return
-  const next = new Set(pinnedIds.value)
-  if (next.has(id)) {
-    next.delete(id)
-  } else {
-    next.add(id)
-  }
-  pinnedIds.value = next
+  emit('update-participant', participant.id, { pinned: !participant.pinned })
 }
 
-function isPinned(id: string): boolean {
-  return pinnedIds.value.has(id)
-}
-
-function weightOf(id: string): number {
-  return weights.value[id] ?? 1
-}
-
-function setWeight(id: string, value: number) {
+function setWeight(participant: Participant, value: number) {
   if (props.spectatorMode) return
-  weights.value = {
-    ...weights.value,
-    [id]: Math.max(1, Math.min(5, value)),
-  }
+  emit('update-participant', participant.id, { weight: Math.max(1, Math.min(5, value)) })
 }
 
 function copyReport() {
   const active = props.active
     .map((participant) => {
-      const pin = isPinned(participant.id) ? ' pinned' : ''
-      const weight = weightOf(participant.id)
+      const pin = participant.pinned ? ' pinned' : ''
+      const weight = weightOf(participant)
       return `- ${participant.name}${pin}${weight > 1 ? ` x${weight}` : ''}`
     })
     .join('\n') || '- none'
@@ -313,7 +311,7 @@ onBeforeUnmount(() => {
       </div>
       <div class="odds-pill">
         <strong>{{ nextOdds }}</strong>
-        <span>next odds</span>
+        <span>{{ nextOddsLabel }}</span>
       </div>
     </div>
 
@@ -523,7 +521,7 @@ onBeforeUnmount(() => {
           v-for="p in activeFiltered"
           :key="p.id"
           class="participant-item"
-          :class="{ pending: p.pending, error: p.error, pinned: isPinned(p.id) }"
+          :class="{ pending: p.pending, error: p.error, pinned: p.pinned }"
         >
           <span class="name-cell">
             <span class="identity-token" :style="{ background: identityColor(p.name) }">{{
@@ -534,27 +532,27 @@ onBeforeUnmount(() => {
           <span class="row-tools">
             <button
               class="mini-btn"
-              :class="{ active: isPinned(p.id) }"
-              :title="isPinned(p.id) ? 'Unpin' : 'Pin'"
+              :class="{ active: p.pinned }"
+              :title="p.pinned ? 'Unpin' : 'Pin'"
               :disabled="spectatorMode"
-              @click="togglePin(p.id)"
+              @click="togglePin(p)"
             >
               Pin
             </button>
             <button
               class="mini-btn"
               title="Decrease weight"
-              :disabled="spectatorMode || weightOf(p.id) <= 1"
-              @click="setWeight(p.id, weightOf(p.id) - 1)"
+              :disabled="spectatorMode || weightOf(p) <= 1"
+              @click="setWeight(p, weightOf(p) - 1)"
             >
               -
             </button>
-            <span class="weight-pill">x{{ weightOf(p.id) }}</span>
+            <span class="weight-pill">x{{ weightOf(p) }}</span>
             <button
               class="mini-btn"
               title="Increase weight"
-              :disabled="spectatorMode || weightOf(p.id) >= 5"
-              @click="setWeight(p.id, weightOf(p.id) + 1)"
+              :disabled="spectatorMode || weightOf(p) >= 5"
+              @click="setWeight(p, weightOf(p) + 1)"
             >
               +
             </button>
@@ -565,7 +563,7 @@ onBeforeUnmount(() => {
             class="btn btn-remove"
             title="Remove"
             :aria-label="`Remove ${p.name}`"
-            :disabled="spectatorMode || isPinned(p.id)"
+            :disabled="spectatorMode || p.pinned"
           >
             &times;
           </button>

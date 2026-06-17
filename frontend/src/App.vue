@@ -19,6 +19,7 @@ const {
   addName,
   addNames,
   removeName,
+  updateParticipant,
   doSpin,
   applySpinResult,
   reset,
@@ -602,6 +603,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
               @add="addName"
               @add-batch="addNames"
               @remove="removeName"
+              @update-participant="updateParticipant"
               @reset="reset"
               @update:sound-enabled="soundEnabled = $event"
               @update:sound-intensity="soundIntensity = $event"

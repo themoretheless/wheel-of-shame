@@ -11,14 +11,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rand::prelude::IndexedRandom;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow};
 use sqlx::{Row, SqlitePool};
 
 use crate::error::AppError;
 use crate::models::{Participant, Session, SpinResult};
 
-use super::Store;
+use super::{choose_weighted_active_index, Store};
 
 #[derive(Clone)]
 pub struct SqliteStore {
@@ -41,6 +40,8 @@ fn row_to_participant(row: &SqliteRow) -> Participant {
             .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
             .map(|d| d.with_timezone(&Utc)),
         spin_order: spin_order.map(|v| v as u32),
+        pinned: row.get::<bool, _>("pinned"),
+        weight: row.get::<i64, _>("weight") as u32,
     }
 }
 
@@ -125,12 +126,19 @@ impl SqliteStore {
                 removed INTEGER NOT NULL DEFAULT 0,
                 removed_at TEXT,
                 spin_order INTEGER,
+                pinned INTEGER NOT NULL DEFAULT 0,
+                weight INTEGER NOT NULL DEFAULT 1,
                 PRIMARY KEY (session_id, id)
             );",
         )
         .execute(&self.pool)
         .await
         .map_err(db_err)?;
+
+        self.ensure_participant_column("pinned", "INTEGER NOT NULL DEFAULT 0")
+            .await?;
+        self.ensure_participant_column("weight", "INTEGER NOT NULL DEFAULT 1")
+            .await?;
 
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_participants_session
@@ -140,6 +148,27 @@ impl SqliteStore {
         .await
         .map_err(db_err)?;
 
+        Ok(())
+    }
+
+    async fn ensure_participant_column(
+        &self,
+        name: &str,
+        definition: &str,
+    ) -> Result<(), AppError> {
+        let rows = sqlx::query("PRAGMA table_info(participants)")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(db_err)?;
+        let exists = rows.iter().any(|row| row.get::<String, _>("name") == name);
+        if !exists {
+            sqlx::query(&format!(
+                "ALTER TABLE participants ADD COLUMN {name} {definition}",
+            ))
+            .execute(&self.pool)
+            .await
+            .map_err(db_err)?;
+        }
         Ok(())
     }
 }
@@ -178,7 +207,7 @@ impl Store for SqliteStore {
 
     async fn list_participants(&self, session_id: &str) -> Result<Vec<Participant>, AppError> {
         let rows = sqlx::query(
-            "SELECT session_id, id, name, removed, removed_at, spin_order
+            "SELECT session_id, id, name, removed, removed_at, spin_order, pinned, weight
              FROM participants WHERE session_id = ?",
         )
         .bind(session_id)
@@ -208,8 +237,8 @@ impl Store for SqliteStore {
         for p in participants {
             sqlx::query(
                 "INSERT OR REPLACE INTO participants
-                    (session_id, id, name, removed, removed_at, spin_order)
-                 VALUES (?, ?, ?, ?, ?, ?)",
+                    (session_id, id, name, removed, removed_at, spin_order, pinned, weight)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(session_id)
             .bind(&p.id)
@@ -217,6 +246,8 @@ impl Store for SqliteStore {
             .bind(p.removed)
             .bind(p.removed_at.map(|d| d.to_rfc3339()))
             .bind(p.spin_order.map(|v| v as i64))
+            .bind(p.pinned)
+            .bind(p.weight as i64)
             .execute(&mut *tx)
             .await
             .map_err(db_err)?;
@@ -242,13 +273,12 @@ impl Store for SqliteStore {
             return Err(AppError::NotFound("Session not found".into()));
         }
 
-        let result =
-            sqlx::query("DELETE FROM participants WHERE session_id = ? AND id = ?")
-                .bind(session_id)
-                .bind(participant_id)
-                .execute(&mut *tx)
-                .await
-                .map_err(db_err)?;
+        let result = sqlx::query("DELETE FROM participants WHERE session_id = ? AND id = ?")
+            .bind(session_id)
+            .bind(participant_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
 
         if result.rows_affected() == 0 {
             return Err(AppError::NotFound("Participant not found".into()));
@@ -256,6 +286,61 @@ impl Store for SqliteStore {
 
         tx.commit().await.map_err(db_err)?;
         Ok(())
+    }
+
+    async fn update_participant(
+        &self,
+        session_id: &str,
+        participant_id: &str,
+        pinned: Option<bool>,
+        weight: Option<u32>,
+    ) -> Result<Participant, AppError> {
+        let mut tx = self.begin_write().await?;
+
+        let session = sqlx::query("SELECT 1 FROM sessions WHERE id = ?")
+            .bind(session_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        if session.is_none() {
+            return Err(AppError::NotFound("Session not found".into()));
+        }
+
+        let row = sqlx::query(
+            "SELECT session_id, id, name, removed, removed_at, spin_order, pinned, weight
+             FROM participants WHERE session_id = ? AND id = ?",
+        )
+        .bind(session_id)
+        .bind(participant_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        let Some(row) = row else {
+            return Err(AppError::NotFound("Participant not found".into()));
+        };
+        let mut participant = row_to_participant(&row);
+        if let Some(pinned) = pinned {
+            participant.pinned = pinned;
+        }
+        if let Some(weight) = weight {
+            participant.weight = weight;
+        }
+
+        sqlx::query(
+            "UPDATE participants
+             SET pinned = ?, weight = ?
+             WHERE session_id = ? AND id = ?",
+        )
+        .bind(participant.pinned)
+        .bind(participant.weight as i64)
+        .bind(session_id)
+        .bind(participant_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        tx.commit().await.map_err(db_err)?;
+        Ok(participant)
     }
 
     async fn spin(&self, session_id: &str) -> Result<SpinResult, AppError> {
@@ -271,7 +356,7 @@ impl Store for SqliteStore {
         }
 
         let rows = sqlx::query(
-            "SELECT session_id, id, name, removed, removed_at, spin_order
+            "SELECT session_id, id, name, removed, removed_at, spin_order, pinned, weight
              FROM participants WHERE session_id = ?",
         )
         .bind(session_id)
@@ -280,17 +365,15 @@ impl Store for SqliteStore {
         .map_err(db_err)?;
         let parts: Vec<Participant> = rows.iter().map(row_to_participant).collect();
 
-        let active: Vec<&Participant> = parts.iter().filter(|p| !p.removed).collect();
-        if active.is_empty() {
-            return Err(AppError::NoParticipantsLeft);
-        }
+        let picked_idx =
+            choose_weighted_active_index(&parts).ok_or(AppError::NoParticipantsLeft)?;
 
         let spin_order = parts.iter().filter(|p| p.removed).count() as u32 + 1;
-        let mut picked = (*active.choose(&mut rand::rng()).unwrap()).clone();
+        let mut picked = parts[picked_idx].clone();
         picked.removed = true;
         picked.removed_at = Some(Utc::now());
         picked.spin_order = Some(spin_order);
-        let remaining = active.len() - 1;
+        let remaining = parts.iter().filter(|p| !p.removed).count() - 1;
 
         sqlx::query(
             "UPDATE participants
@@ -332,7 +415,7 @@ impl Store for SqliteStore {
         .map_err(db_err)?;
 
         let rows = sqlx::query(
-            "SELECT session_id, id, name, removed, removed_at, spin_order
+            "SELECT session_id, id, name, removed, removed_at, spin_order, pinned, weight
              FROM participants WHERE session_id = ?",
         )
         .bind(session_id)
@@ -396,7 +479,9 @@ mod tests {
 
         let restored = s.reset_session(&session.id).await.unwrap();
         assert_eq!(restored.len(), 3);
-        assert!(restored.iter().all(|p| !p.removed && p.spin_order.is_none()));
+        assert!(restored
+            .iter()
+            .all(|p| !p.removed && p.spin_order.is_none()));
     }
 
     #[tokio::test]
