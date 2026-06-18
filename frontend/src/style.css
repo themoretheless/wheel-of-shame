@@ -17,6 +17,19 @@ body {
   min-height: 100vh;
 }
 
+/* Theming (new idea) */
+.high-contrast {
+  --bg: #000;
+  --fg: #fff;
+  background: #000;
+  color: #fff;
+}
+.high-contrast kbd {
+  background: #fff;
+  color: #000;
+  border-color: #000;
+}
+
 /* Keycap-style hint chip (e.g. the "Space to spin" shortcut). */
 kbd {
   display: inline-block;

@@ -108,9 +108,17 @@ const emit = defineEmits<{
   // Id of the active row the cursor is over (null on leave), so the wheel can
   // lift the matching segment as a hover peek.
   (e: 'hover-name', id: string | null): void
+  (e: 'reorder', from: number, to: number): void
 }>()
 
 const nameInput = ref('')
+const searchTerm = ref('')
+
+const filteredActive = computed(() => {
+  if (!searchTerm.value) return props.active
+  const term = searchTerm.value.toLowerCase()
+  return props.active.filter(p => p.name.toLowerCase().includes(term))
+})
 
 // Template ref on the name field so App.vue can route a global "/" or "n"
 // quick-capture keystroke straight into it without the user reaching for the
@@ -145,6 +153,20 @@ function confirmPaste() {
   }
   pendingPaste.value = null
   nameInput.value = ''
+}
+
+let dragIndex: number | null = null
+
+function onDragStart(index: number, ev: DragEvent) {
+  dragIndex = index
+  if (ev.dataTransfer) ev.dataTransfer.effectAllowed = 'move'
+}
+
+function onDrop(index: number, _ev: DragEvent) {
+  if (dragIndex !== null && dragIndex !== index) {
+    emit('reorder', dragIndex, index)
+  }
+  dragIndex = null
 }
 
 function cancelPaste() {
@@ -208,6 +230,7 @@ function addName() {
       />
       <button @click="addName" class="btn btn-add">Add</button>
     </div>
+    <input v-model="searchTerm" placeholder="Search..." class="name-input search" style="margin-top: 4px; font-size: 12px;" />
 
     <!-- Bulk-paste confirm: a pasted multi-name blob is parsed and deduped, then
          held here so the count can be reviewed before it lands as one batch. -->
@@ -254,7 +277,7 @@ function addName() {
            below slide up to fill the gap, instead of vanishing instantly. -->
       <TransitionGroup v-if="active.length > 0" tag="ul" name="eject">
         <li
-          v-for="p in active"
+          v-for="(p, index) in filteredActive"
           :key="p.id"
           class="participant-item"
           :class="{
@@ -269,6 +292,11 @@ function addName() {
             '--odds-color': identityColor(p.name),
             '--tick-color': identityColor(p.name),
           }"
+          draggable="true"
+          @dragstart="onDragStart(index, $event)"
+          @dragover.prevent
+          @drop="onDrop(index, $event)"
+          @dragenter.prevent
           @mouseenter="emit('hover-name', p.id)"
           @mouseleave="emit('hover-name', null)"
         >

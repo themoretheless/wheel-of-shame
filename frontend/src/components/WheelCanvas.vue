@@ -7,7 +7,21 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js'
+// WebGPU support - dynamic import to avoid build issues if not available
+let WebGPURendererClass: any = null;
 import opentype from 'opentype.js'
+import { computeAngles } from '../utils/wheel'
+
+// Dev-only FPS counter (idea from top-100). Toggle with window.__WHEEL_SHOW_FPS = true or ?debug
+let fps = 0
+let fpsFrameCount = 0
+let lastFpsTime = performance.now()
+let showFps = false
+if (typeof window !== 'undefined') {
+  // Enable via console or query
+  const params = new URLSearchParams(window.location.search)
+  showFps = params.has('debug') || (window as any).__WHEEL_SHOW_FPS === true
+}
 import type { Participant } from '../types'
 import { identityColor, hashName } from '../utils/identity'
 
@@ -19,6 +33,9 @@ const props = defineProps<{
   // the matching wheel segment lifts and glows in sympathy. Reuses the same
   // pointer-hover ease path as on-canvas hovering.
   peekId?: string | null
+  // For live editor preview (inspector drag / timeline scrub): temp overrides for weight/visual without mutating master list.
+  // WheelCanvas merges these into effective values for build only (sole owner of 3D).
+  previewOverrides?: Record<string, { weight?: number; visual?: any }>
 }>()
 
 const emit = defineEmits<{
@@ -57,7 +74,7 @@ function toggleMute() {
   }
 }
 
-let renderer: THREE.WebGLRenderer | null = null
+let renderer: THREE.WebGLRenderer | any | null = null
 let composer: EffectComposer | null = null
 // Bloom pass held so animateSpin can surge its strength with the wheel's
 // energy: bright at launch, easing back to BLOOM_BASE as the spin decelerates.
@@ -656,7 +673,7 @@ function buildWheelWithAngles(
     }
     const startAngle = cursor
     cursor += segAngle
-    const color = identityColor(p.name)
+    const color = (p as any).visual?.color_override || identityColor(p.name)
     donutArcs.push({ start: startAngle, end: startAngle + segAngle, color })
 
     const mesh = new THREE.Mesh(getSegmentGeometry(segAngle), getCachedMat(color, 0.1, 0.55))
@@ -877,7 +894,26 @@ function setCountdownArc(frac: number) {
 
 function buildWheel() {
   const active = props.participants.filter((p) => !p.removed)
-  buildWheelWithAngles(active)
+  const overrides = props.previewOverrides || {}
+  // Merge preview overrides for live editor (drag/scrub) - data only, no mutation of master.
+  const effective = active.map((p: any) => {
+    const o = overrides[p.id] || {}
+    return {
+      ...p,
+      weight: o.weight !== undefined ? o.weight : p.weight,
+      visual: o.visual !== undefined ? o.visual : p.visual,
+    }
+  })
+  // Support editor weights: derive proportional angles if any weight !=1
+  // Use shared pure math from utils/wheel (poured from top 100 perf ideas)
+  const hasWeights = effective.some((p: any) => (p.weight ?? 1) !== 1)
+  if (hasWeights) {
+    const angles = computeAngles(effective)
+    buildWheelWithAngles(effective, angles)
+  } else {
+    buildWheelWithAngles(effective)
+  }
+  // Note: color overrides from visual applied in material creation (identityColor fallback + delta if present in future pass)
 }
 
 // Animate: winner segment shrinks, others expand, then emit result.
@@ -1182,7 +1218,7 @@ function onCanvasClick(e: MouseEvent) {
   }
 }
 
-function initScene() {
+async function initScene() {
   const container = containerRef.value
   if (!container) return
 
@@ -1195,7 +1231,30 @@ function initScene() {
   camera.position.set(0, 0, 7.8)
   camera.lookAt(0, 0, 0)
 
-  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
+  // WebGPU first (per top improvement suggestions).
+  // Benefits: significantly better performance on modern GPUs, native compute shaders (future: segment physics, advanced particles), better MSAA/HDR.
+  // Graceful fallback to WebGL (preserves full cinematic bloom via EffectComposer).
+  // Current limitation: post-processing (UnrealBloomPass) is WebGL-only in three/addons; on WebGPU we rely on toneMapping + emissive materials for glows (still very nice for the squash, streak and winner lift).
+  let useWebGPU = false
+  try {
+    if (navigator.gpu) {
+      // @ts-ignore - may not resolve in all envs
+      const mod = await import(/* @vite-ignore */ 'three/examples/jsm/renderers/webgpu/WebGPURenderer.js')
+      WebGPURendererClass = mod.WebGPURenderer || mod.default
+      const gpuRenderer = new WebGPURendererClass({ antialias: true, alpha: true })
+      await gpuRenderer.init()
+      renderer = gpuRenderer
+      useWebGPU = true
+      console.info('[WheelCanvas] Using WebGPU renderer (experimental, great for perf and future features)')
+    }
+  } catch (e) {
+    console.warn('[WheelCanvas] WebGPU init failed, falling back to WebGL', e)
+  }
+
+  if (!renderer) {
+    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
+  }
+
   renderer.setSize(w, h)
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
   renderer.setClearColor(0x1e1e1e, 1)
@@ -1203,28 +1262,29 @@ function initScene() {
   renderer.toneMappingExposure = 1.2
   container.appendChild(renderer.domElement)
 
-  // Studio image-based lighting: bake a RoomEnvironment into a PMREM so the
-  // metallic hub/pins/pegs pick up soft, realistic reflections.
-  const pmrem = new THREE.PMREMGenerator(renderer)
+  // Studio image-based lighting works for both renderers.
+  const pmrem = new THREE.PMREMGenerator(renderer as any)
   scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture
   pmrem.dispose()
 
-  // Cinematic bloom: render through an EffectComposer so bright highlights
-  // (notably the lifted winner segment) bleed a soft glow. OutputPass applies
-  // tone mapping + sRGB at the end of the chain.
-  composer = new EffectComposer(renderer)
-  composer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
-  composer.setSize(w, h)
-  composer.addPass(new RenderPass(scene, camera))
-  // Skip the bloom pass under reduced motion: the glow exists to sell the
-  // animated winner lift, and dropping it keeps the static frame calmer.
-  if (!prefersReducedMotion()) {
-    bloomPass = new UnrealBloomPass(new THREE.Vector2(w, h), BLOOM_BASE, 0.5, 0.85)
-    composer.addPass(bloomPass)
-  }
-  composer.addPass(new OutputPass())
+  if (useWebGPU) {
+    // Direct render path on WebGPU (no EffectComposer yet for bloom).
+    // The existing emissive materials on lifted segments, streak ring and hub still produce nice highlights.
+    controls = new OrbitControls(camera, renderer.domElement)
+  } else {
+    // Cinematic bloom via EffectComposer (WebGL only for now).
+    composer = new EffectComposer(renderer as THREE.WebGLRenderer)
+    composer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+    composer.setSize(w, h)
+    composer.addPass(new RenderPass(scene, camera))
+    if (!prefersReducedMotion()) {
+      bloomPass = new UnrealBloomPass(new THREE.Vector2(w, h), BLOOM_BASE, 0.5, 0.85)
+      composer.addPass(bloomPass)
+    }
+    composer.addPass(new OutputPass())
 
-  controls = new OrbitControls(camera, renderer.domElement)
+    controls = new OrbitControls(camera, renderer.domElement)
+  }
   controls.enableDamping = true
   controls.dampingFactor = 0.08
   controls.enablePan = false
@@ -1310,10 +1370,34 @@ function initScene() {
   renderer.domElement.addEventListener('mousemove', onCanvasMouseMove)
   renderer.domElement.addEventListener('pointerdown', () => { isPointerDown = true })
   renderer.domElement.addEventListener('pointerup', () => { isPointerDown = false })
+  // Mobile touch support (new idea)
+  renderer.domElement.addEventListener('touchstart', (ev: TouchEvent) => { isPointerDown = true; ev.preventDefault() })
+  renderer.domElement.addEventListener('touchend', (ev: TouchEvent) => { isPointerDown = false; onCanvasClick(ev as any); ev.preventDefault() })
   renderer.domElement.style.cursor = 'default'
 
   // Fit wheel to available space and center
   fitWheel()
+
+  // Dev FPS overlay (non-intrusive, top-left of container)
+  if (showFps) {
+    const fpsEl = document.createElement('div')
+    fpsEl.style.cssText = 'position:absolute;top:4px;left:4px;background:rgba(0,0,0,0.6);color:#0f0;font:10px monospace;padding:1px 3px;pointer-events:none;z-index:100'
+    fpsEl.textContent = 'FPS --'
+    containerRef.value?.appendChild(fpsEl)
+
+    const fpsLoop = () => {
+      fpsFrameCount++
+      const now = performance.now()
+      if (now - lastFpsTime > 1000) {
+        fps = Math.round((fpsFrameCount * 1000) / (now - lastFpsTime))
+        fpsFrameCount = 0
+        lastFpsTime = now
+        fpsEl.textContent = `FPS ${fps}`
+      }
+      requestAnimationFrame(fpsLoop)
+    }
+    requestAnimationFrame(fpsLoop)
+  }
 
   // Load font for 3D text
   opentype.load('/Roboto-Bold.ttf', (_err: any, font: any) => {
@@ -1718,7 +1802,10 @@ function resetView() {
   requestAnimationFrame(frame)
 }
 
-defineExpose({ dismissWinner, resetView, isMuted, toggleMute })
+defineExpose({ dismissWinner, resetView, isMuted, toggleMute, captureCanvas: () => {
+  if (renderer && renderer.domElement) return renderer.domElement as HTMLCanvasElement
+  return null
+} })
 
 // Tactile companion to the peg tick / landing thunk: a short haptic buzz on
 // devices that support the Vibration API. Gated behind the same isMuted flag and
@@ -2346,6 +2433,25 @@ watch(
   },
 )
 
+// Live preview overrides for editor features (inspector drag, timeline scrub).
+// Triggers rebuild using merged effective weights/visuals (data only; WheelCanvas retains sole ownership of 3D scene/animations).
+watch(
+  () => {
+    if (!props.previewOverrides) return ''
+    return Object.keys(props.previewOverrides)
+      .sort()
+      .map((k) => `${k}:${JSON.stringify(props.previewOverrides![k])}`)
+      .join('|')
+  },
+  () => {
+    if (!isSpinAnimating) {
+      buildWheel()
+      pulseOddsHalo()
+    }
+  },
+  { flush: 'post' },
+)
+
 // Hover effect on spin buttons
 const hoverMouse = new THREE.Vector2()
 let hoveredBtn: THREE.Mesh | null = null
@@ -2525,9 +2631,10 @@ watch(
   },
 )
 
-onMounted(() => {
-  initScene()
+onMounted(async () => {
+  await initScene()
 })
+
 
 onBeforeUnmount(() => {
   cancelAnimationFrame(animFrameId)

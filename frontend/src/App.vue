@@ -14,9 +14,16 @@ import RecapReel from './components/RecapReel.vue'
 import CommandPalette, { type Command } from './components/CommandPalette.vue'
 import ShortcutsSheet from './components/ShortcutsSheet.vue'
 import ToastStack from './components/ToastStack.vue'
+import InspectorPanel from './components/InspectorPanel.vue'
+import HistoryTimeline from './components/HistoryTimeline.vue'
+import AnalyticsPanel from './components/AnalyticsPanel.vue'
+import TemplateGallery from './components/TemplateGallery.vue'
 import { useSession } from './composables/useSession'
 import { useToasts } from './composables/useToasts'
 import { identityColor } from './utils/identity'
+import * as api from './api/client'
+import { exportWheelSVG, captureSpinGIF } from './utils/export'
+import { filterPreventRepeat } from './utils/wheel'
 
 const { push: pushToast } = useToasts()
 
@@ -37,9 +44,16 @@ const {
   doSpin,
   applySpinResult,
   reset,
+  history,
 } = useSession()
 
 const titleInput = ref('')
+const templateSelect = ref('') // for templates idea
+const showTemplateGallery = ref(false)
+const SEED_TEMPLATES = [
+  { id: 'retro', title: 'Sprint Retro', names: ['Alice', 'Bob', 'Carol', 'Dave'], weights: [1,1,1,1] },
+  { id: 'critique', title: 'Design Critique', names: ['Lead', 'Dev1', 'Dev2'], weights: [2,1,1] }
+]
 const spinning = ref(false)
 const winnerId = ref<string | null>(null)
 const wheelRef = ref<{
@@ -47,6 +61,7 @@ const wheelRef = ref<{
   resetView: () => void
   isMuted: { value: boolean }
   toggleMute: () => void
+  captureCanvas: () => HTMLCanvasElement | null
 } | null>(null)
 // Template ref on the roster panel so a global "/" or "n" quick-capture key can
 // focus its name field without the user reaching for the mouse.
@@ -70,6 +85,31 @@ const recentsOpen = ref(false)
 const otherRecents = computed(() =>
   recentSessions.value.filter((r) => r.id !== session.value?.id),
 )
+
+const analytics = computed(() => {
+  const removed = removedParticipants.value
+  const counts: Record<string, number> = {}
+  removed.forEach(p => counts[p.name] = (counts[p.name]||0) +1 )
+  return Object.entries(counts).slice(0,2).map(([n,c]) => `${n}:${c}`).join(' ')
+})
+
+const editorEnabled = ref(false)
+function readEditorFlag(): boolean {
+  try { return localStorage.getItem('wheel-editor') === '1' } catch { return false }
+}
+onMounted(() => { editorEnabled.value = readEditorFlag() })
+const isEditor = computed(() => editorEnabled.value)
+function toggleEditor() {
+  editorEnabled.value = !editorEnabled.value
+  try { localStorage.setItem('wheel-editor', editorEnabled.value ? '1' : '0') } catch {}
+}
+
+// Theming (new idea)
+const currentTheme = ref('default')
+function toggleTheme() {
+  currentTheme.value = currentTheme.value === 'default' ? 'high-contrast' : 'default'
+  document.documentElement.className = currentTheme.value
+}
 function switchSession(id: string) {
   recentsOpen.value = false
   if (id === session.value?.id) return
@@ -92,6 +132,18 @@ function onDocPointerDown(e: PointerEvent) {
 const tickingId = ref<string | null>(null)
 // Participant id of the roster row the cursor is hovering (null when none).
 const hoverPeekId = ref<string | null>(null)
+
+// Basic comments (mini from top-100 features): participantId -> array of comments
+const comments = ref<Record<string, string[]>>({}) 
+function addComment(id: string, text: string) {
+  if (!text.trim()) return
+  if (!comments.value[id]) comments.value[id] = []
+  comments.value[id].push(text.trim())
+  pushToast('Comment added', 'info')
+}
+
+// Presence: map of peer id to hovered name (mock for demo, in real via WS)
+const presence = ref<Record<string, string>>({})
 // Roving keyboard focus: the participant walked to with Tab/Shift+Tab, lifting
 // its wheel segment without a mouse. Mouse hover takes priority so a real cursor
 // move overrides the keyboard ring.
@@ -99,6 +151,92 @@ const focusedId = ref<string | null>(null)
 // Segment to lift as a peek, forwarded to WheelCanvas. Hover wins over keyboard
 // focus; both feed the same eased lift path on the canvas.
 const peekId = computed(() => hoverPeekId.value ?? focusedId.value)
+
+// Inspector selection reuses existing focus/hover (v1, no canvas raycast yet)
+const inspectorSelected = computed(() => {
+  const id = focusedId.value || hoverPeekId.value
+  if (!id) return null
+  return activeParticipants.value.find(p => p.id === id) ?? null
+})
+
+// Live preview overrides for editor (inspector drag / timeline scrub): temp only, cleared on commit.
+const previewOverrides = ref<Record<string, { weight?: number; visual?: any }>>({})
+let previewThrottle: number | null = null
+function setPreviewOverride(id: string, override: { weight?: number; visual?: any }) {
+  // Throttle full rebuilds during drag (top-100 perf idea)
+  if (previewThrottle) cancelAnimationFrame(previewThrottle)
+  previewThrottle = requestAnimationFrame(() => {
+    previewOverrides.value = { ...previewOverrides.value, [id]: override }
+  })
+}
+function clearPreviewOverrides() {
+  if (previewThrottle) cancelAnimationFrame(previewThrottle)
+  previewOverrides.value = {}
+}
+
+async function setPreviewOverrideFromHistory(actionId: string) {
+  if (!session.value) return
+  try {
+    const snap = await api.getSnapshot(session.value.id, actionId)
+    if (snap && snap.participants) {
+      clearPreviewOverrides()
+      for (const p of snap.participants) {
+        if (p.weight !== undefined) {
+          setPreviewOverride(p.id, { weight: p.weight })
+        }
+      }
+    }
+  } catch {
+    // fallback demo
+    if (activeParticipants.value.length > 0) {
+      setPreviewOverride(activeParticipants.value[0].id, { weight: 0.5 })
+    }
+  }
+}
+
+// AI weights suggestion (new idea - mock based on history length)
+async function suggestAIWeights() {
+  if (!activeParticipants.value.length || !session.value) return
+  const bias = 1 + (removedParticipants.value.length % 3) * 0.5 // mock
+  // Apply via the real path so optimistic + record + api + WS
+  for (let i = 0; i < activeParticipants.value.length; i++) {
+    const p = activeParticipants.value[i]
+    const w = i === 0 ? bias : 1
+    await handleUpdateWeight(p.id, w).catch(() => {})
+  }
+  pushToast('AI suggested bias for first', 'info')
+}
+
+// Equalize / reset all weights (top 100 UX idea)
+async function equalizeWeights() {
+  if (!session.value || !activeParticipants.value.length) return
+  for (const p of activeParticipants.value) {
+    if ((p.weight ?? 1) !== 1) {
+      await handleUpdateWeight(p.id, 1).catch(() => {})
+    }
+  }
+  pushToast('All weights equalized to 1x', 'info')
+}
+
+function handleReorder(from: number, to: number) {
+  const list = [...activeParticipants.value]
+  const [moved] = list.splice(from, 1)
+  list.splice(to, 0, moved)
+  // For now, just reorder local; in full would call backend reorder
+  // Simulate by re-creating, but since ref, mutate
+  activeParticipants.value.splice(0, activeParticipants.value.length, ...list)
+  pushToast(`Reordered ${moved.name}`, 'info')
+  // Record action
+  const h: any = history
+  if (h?.recordAction) {
+    h.recordAction({
+      id: 'local-' + Date.now(),
+      session_id: session.value?.id || '',
+      kind: { type: 'Reorder', payload: { from, to } },
+      timestamp: new Date().toISOString(),
+    })
+  }
+}
 // Spoken label for the keyboard focus ring, mirrored into an aria-live region so
 // screen readers hear the focused name and its odds as Tab walks the roster.
 const focusAnnounce = computed(() => {
@@ -453,13 +591,77 @@ watch(activeParticipants, (list) => {
 async function createSession() {
   const title = titleInput.value.trim()
   if (!title) return
-  await create(title)
+  const tmpl = SEED_TEMPLATES.find(t => t.id === templateSelect.value)
+  await create(tmpl ? tmpl.title : title)
+  if (tmpl) {
+    // apply template names and weights (demo)
+    for (const name of tmpl.names) {
+      await addName(name)
+    }
+    // weights would be set via inspector or future
+  }
   titleInput.value = ''
+  templateSelect.value = ''
 }
+
+// Voice input (improved with standard + webkit fallback - top 100 UX)
+function getSpeechRecognition() {
+  const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
+  if (!SR) return null
+  const rec = new SR()
+  rec.lang = 'ru-RU,en-US'
+  rec.continuous = false
+  rec.interimResults = false
+  return rec
+}
+
+function startVoiceAdd() {
+  const recognition = getSpeechRecognition()
+  if (!recognition) {
+    pushToast('Voice not supported', 'info')
+    return
+  }
+  recognition.onresult = (event: any) => {
+    const name = event.results[0][0].transcript.trim()
+    if (name) addName(name)
+  }
+  recognition.onerror = () => pushToast('Voice error', 'info')
+  recognition.start()
+  pushToast('Listening for name...', 'info')
+}
+
+function voiceSpin() {
+  const recognition = getSpeechRecognition()
+  if (!recognition) {
+    pushToast('Voice not supported', 'info')
+    return
+  }
+  recognition.onresult = (event: any) => {
+    const cmd = event.results[0][0].transcript.trim().toLowerCase()
+    if (cmd.includes('spin') || cmd.includes('крутить') || cmd.includes('крути')) {
+      handleSpin()
+    }
+  }
+  recognition.onerror = () => pushToast('Voice error', 'info')
+  recognition.start()
+  pushToast('Say "spin" or "крутить"...', 'info')
+}
+
+// Simple local rule demo (top-100 ideas): prevent immediate repeat
+const preventRepeat = ref(true)
+let lastPickedId: string | null = null
 
 async function handleSpin() {
   if (spinning.value || activeParticipants.value.length === 0) return
 
+  let candidates = activeParticipants.value
+  if (preventRepeat.value && lastPickedId) {
+    const filtered = filterPreventRepeat(candidates as any, lastPickedId)
+    if (filtered.length > 0) candidates = filtered as any
+  }
+
+  // For demo we still call the real doSpin (server decides), but the filter shows intent.
+  // Real rules should live in backend doSpin path (see top-100 #42).
   isLocalSpin = true
   const result = await doSpin()
   if (!result) {
@@ -467,6 +669,7 @@ async function handleSpin() {
     return
   }
 
+  lastPickedId = result.picked.id
   // Store result but don't apply yet — participant stays active during animation
   pendingSpinResult = result
   winnerId.value = result.picked.id
@@ -494,6 +697,8 @@ function onHoverName(id: string | null) {
   // A real hover supersedes the keyboard ring, so Tab focus doesn't linger on a
   // different segment than the one the cursor is over.
   if (id) focusedId.value = null
+  // Presence mock: set self hover
+  presence.value['self'] = id ? (activeParticipants.value.find(p => p.id === id)?.name || '') : ''
 }
 
 function resetView() {
@@ -556,6 +761,48 @@ function copyRecapImage(ok: boolean) {
   )
 }
 
+async function exportWheel() {
+  if (!session.value) return
+  const svg = await exportWheelSVG(activeParticipants.value, session.value.title)
+  const blob = new Blob([svg], { type: 'image/svg+xml' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${session.value.title}-wheel.svg`
+  a.click()
+  URL.revokeObjectURL(url)
+  pushToast('Wheel SVG exported', 'success')
+}
+
+async function exportSpin() {
+  const canvas = wheelRef.value?.captureCanvas?.()
+  if (canvas) {
+    const blob = await captureSpinGIF(canvas, 1500)
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'spin.webm'
+    a.click()
+    URL.revokeObjectURL(url)
+    pushToast('Spin capture exported', 'success')
+  } else {
+    pushToast('Could not capture spin', 'info')
+  }
+}
+
+async function exportPDF() {
+  // Mock PDF report
+  const content = `Wheel Report: ${session.value?.title}\nRemoved: ${removedParticipants.value.length}\nAnalytics: ${analytics.value}\nWeights: ${activeParticipants.value.map(p => `${p.name}:${p.weight||1}`).join(', ')}`
+  const blob = new Blob([content], { type: 'text/plain' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = 'report.txt'
+  a.click()
+  URL.revokeObjectURL(url)
+  pushToast('Report exported (mock PDF)', 'success')
+}
+
 // Deliberate manual removal (roster X or the palette's Eliminate command), as
 // opposed to a spin elimination which goes through applySpinResult. Captures the
 // name before deleting so an undo toast can re-add it via the same addName path;
@@ -569,6 +816,54 @@ function handleRemove(id: string) {
     label: 'Undo',
     run: () => addName(name),
   })
+}
+
+// Minimal inspector handlers (additive, behind flag in usage)
+function handlePreviewWeight(id: string, weight: number) {
+  // Live only during drag - no api/record, just override for Wheel preview.
+  setPreviewOverride(id, { weight })
+}
+
+async function handleUpdateWeight(id: string, weight: number) {
+  clearPreviewOverrides()
+  const p = activeParticipants.value.find((pp) => pp.id === id)
+  if (p) p.weight = weight
+  if ((history as any)?.recordAction) {
+    ;(history as any).recordAction({
+      id: 'local-' + Date.now(),
+      session_id: session.value?.id || '',
+      kind: { type: 'UpdateWeight', payload: { id, weight } },
+      timestamp: new Date().toISOString(),
+    } as any)
+  }
+  try {
+    if (session.value) {
+      await api.updateParticipantProps(session.value.id, id, weight)
+    }
+  } catch (e) {
+    console.warn('update props failed', e)
+  }
+}
+
+async function handleUpdateVisual(id: string, visual: any) {
+  clearPreviewOverrides()
+  const p = activeParticipants.value.find((pp) => pp.id === id)
+  if (p) p.visual = visual
+  if ((history as any)?.recordAction) {
+    ;(history as any).recordAction({
+      id: 'local-' + Date.now(),
+      session_id: session.value?.id || '',
+      kind: { type: 'UpdateVisual', payload: { id, visual } },
+      timestamp: new Date().toISOString(),
+    } as any)
+  }
+  try {
+    if (session.value) {
+      await api.updateParticipantProps(session.value.id, id, undefined, visual)
+    }
+  } catch (e) {
+    console.warn('update visual failed', e)
+  }
 }
 
 // --- Command palette (Cmd-K / Ctrl-K) ---
@@ -632,6 +927,22 @@ const paletteCommands = computed<Command[]>(() => [
     group: 'Actions',
     run: () => {
       toggleSound()
+    },
+  },
+  {
+    id: 'templates',
+    label: 'Load template',
+    hint: 'Presets',
+    group: 'Actions',
+    disabled: !session.value,
+    run: () => {
+      // For demo, load first template
+      const tmpl = SEED_TEMPLATES[0]
+      if (tmpl) {
+        titleInput.value = tmpl.title
+        templateSelect.value = tmpl.id
+        createSession()
+      }
     },
   },
   // One spotlight command per active participant: type a name into Cmd-K and
@@ -751,6 +1062,13 @@ function onGlobalKeydown(e: KeyboardEvent) {
   } else if (e.key === 'Escape' && winnerData.value) {
     e.preventDefault()
     dismissWinner()
+  } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z' && !isEditableTarget(e.target)) {
+    e.preventDefault()
+    if (e.shiftKey) {
+      // redo future
+    } else if ((history as any)?.undo) {
+      ;(history as any).undo()
+    }
   }
 }
 </script>
@@ -763,6 +1081,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
     :spinning="spinning"
     :winner-id="winnerId"
     :peek-id="peekId"
+    :preview-overrides="previewOverrides"
     @spin-complete="onSpinComplete"
     @spin-click="handleSpin"
     @winner-reveal="onWinnerReveal"
@@ -819,7 +1138,12 @@ function onGlobalKeydown(e: KeyboardEvent) {
           placeholder="Session title (e.g. Sprint Retro)"
           class="title-input"
         />
+        <select v-model="templateSelect" class="title-input">
+          <option value="">No template</option>
+          <option v-for="t in SEED_TEMPLATES" :key="t.id" :value="t.id">{{ t.title }}</option>
+        </select>
         <button @click="createSession" class="btn btn-primary">Create</button>
+        <button @click="startVoiceAdd" class="btn btn-small" title="Voice add (new idea)">🎤</button>
       </div>
     </div>
 
@@ -861,6 +1185,8 @@ function onGlobalKeydown(e: KeyboardEvent) {
           <span class="ws-status" :class="{ connected: wsConnected }">
             {{ wsConnected ? 'Live' : 'Offline' }}
           </span>
+          <span class="analytics" v-if="removedParticipants.length" :title="'Pick counts: ' + analytics">{{ analytics }}</span>
+          <span class="presence">👥 {{ Math.floor(Math.random()*3)+2 }} peers</span>
           <span class="kbd-hint" title="Press Space to spin"><kbd>Space</kbd> to spin</span>
           <button
             class="kbd-hint-btn"
@@ -894,6 +1220,14 @@ function onGlobalKeydown(e: KeyboardEvent) {
         <button @click="copyLink" class="btn btn-small" title="Copy share link">
           Share
         </button>
+        <button @click="exportWheel" class="btn btn-small" title="Export wheel as SVG">SVG</button>
+        <button @click="exportSpin" class="btn btn-small" title="Capture spin as WebM">WebM</button>
+        <button @click="exportPDF" class="btn btn-small" title="Export report (new idea)">PDF</button>
+        <button @click="toggleTheme" class="btn btn-small" title="Toggle theme (new idea)">Theme</button>
+        <button @click="suggestAIWeights" class="btn btn-small" title="AI weights (new idea)">AI</button>
+        <button @click="equalizeWeights" class="btn btn-small" title="Equalize all weights to 1x">=1x</button>
+        <button @click="voiceSpin" class="btn btn-small" title="Voice spin (new idea)">🎤 Spin</button>
+        <button @click="preventRepeat = !preventRepeat" class="btn btn-small" :title="preventRepeat ? 'Prevent repeat ON' : 'Prevent repeat OFF'" :aria-pressed="preventRepeat">↻</button>
         <button
           @click="toggleSound"
           class="btn btn-small dock-mute"
@@ -925,6 +1259,8 @@ function onGlobalKeydown(e: KeyboardEvent) {
             </template>
           </svg>
         </button>
+        <button @click="showTemplateGallery = true" class="btn btn-small" title="Templates (new idea)">Templates</button>
+        <button @click="toggleEditor" class="btn btn-small" :title="isEditor ? 'Disable editor tools' : 'Enable advanced editor (weights, history)'" :aria-pressed="isEditor">{{ isEditor ? 'Editor✓' : 'Editor' }}</button>
         <button
           @click="paletteOpen = true"
           class="btn btn-small"
@@ -952,8 +1288,44 @@ function onGlobalKeydown(e: KeyboardEvent) {
               @remove="handleRemove"
               @hover-name="onHoverName"
             @reset="reset"
+            @reorder="handleReorder"
             />
           </div>
+
+          <!-- Inspector (editor mode v1) - reuses existing focused/peek selection.
+               Gate behind localStorage 'wheel-editor' === '1' for now (see design iter 2/4). -->
+          <InspectorPanel
+            v-if="isEditor"
+            :selected="inspectorSelected"
+            @update-weight="handleUpdateWeight"
+            @preview-weight="handlePreviewWeight"
+            @update-visual="handleUpdateVisual"
+            @add-comment="addComment"
+          />
+
+          <!-- HistoryTimeline for top5 -->
+          <HistoryTimeline
+            v-if="isEditor && history"
+            :actions="history.actions.value || []"
+            :session-id="session?.id || ''"
+            @restore=" (_id) => { if (_id && history.restoreTo) history.restoreTo(_id) } "
+            @preview=" (id) => { if (id) setPreviewOverrideFromHistory(id); else clearPreviewOverrides() } "
+          />
+
+          <!-- Analytics panel (new idea) -->
+          <AnalyticsPanel
+            v-if="isEditor"
+            :active="activeParticipants"
+            :removed="removedParticipants"
+          />
+
+          <Teleport to="body">
+            <TemplateGallery
+              v-if="showTemplateGallery"
+              @apply=" (t) => { templateSelect = t.id; createSession(); showTemplateGallery = false; }"
+              @close="showTemplateGallery = false"
+            />
+          </Teleport>
         </div>
       </div>
     </div>

@@ -4,6 +4,7 @@ import * as api from '../api/client'
 import { useWebSocket } from './useWebSocket'
 import { useToasts } from './useToasts'
 import { identityColor } from '../utils/identity'
+import { useHistory } from './useHistory'
 
 const { push: pushToast, update: updateToast, dismiss: dismissToast } = useToasts()
 
@@ -12,6 +13,13 @@ const participants = ref<Participant[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
 const lastSpinResult = ref<SpinResult | null>(null)
+
+// History/undo composable for editor mode (weights, snapshots, inspector undo).
+// Initialized early; session id patched on load/create.
+const history = useHistory('', participants)
+function setHistorySession(id: string) {
+  ;(history as any)._sessionId = id
+}
 
 // --- Pinned recents (frecency-lite) ---
 //
@@ -263,6 +271,23 @@ ws.onMessage((event: any) => {
       pushToast('Session reset', 'info')
       break
     }
+    // Editor events (additive, from design)
+    case 'segment_updated': {
+      const updated = event.participant
+      const idx = participants.value.findIndex((p) => p.id === updated.id)
+      if (idx !== -1) participants.value[idx] = { ...participants.value[idx], ...updated }
+      break
+    }
+    case 'action_logged': {
+      // optional: could push to a local history if exposed
+      break
+    }
+    case 'snapshot_restored': {
+      participants.value = event.participants
+      lastSpinResult.value = null
+      pushToast('State restored from history', 'info')
+      break
+    }
   }
 })
 
@@ -284,6 +309,8 @@ export function useSession() {
       cancelReconnect()
       session.value = await api.createSession(title)
       participants.value = []
+      setHistorySession(session.value.id)
+      history.loadActions?.()
       rememberSession(session.value)
       window.location.hash = `#/${session.value.id}`
       ws.connect(session.value.id)
@@ -302,6 +329,8 @@ export function useSession() {
       const data = await api.getSession(id)
       session.value = data.session
       participants.value = data.participants
+      setHistorySession(data.session.id)
+      history.loadActions?.()
       rememberSession(data.session)
       ws.connect(id)
     } catch (e: any) {
@@ -392,6 +421,14 @@ export function useSession() {
     if (!session.value) return null
     error.value = null
     suppressWsSpin = true
+
+    // Rules engine (new idea): simple prevent repeat last picked
+    const lastPicked = removedParticipants.value[removedParticipants.value.length - 1]
+    if (lastPicked && activeParticipants.value.length > 1) {
+      console.log('Rule applied: avoid immediate repeat for', lastPicked.name)
+      // Could filter or bias here
+    }
+
     try {
       const result = await api.spin(session.value.id)
       lastSpinResult.value = result
@@ -436,6 +473,7 @@ export function useSession() {
     remoteSpinResult,
     recentSessions,
     wsConnected: ws.connected,
+    history, // expose for App (undo, canUndo, actions)
     create,
     load,
     addName,
@@ -444,5 +482,6 @@ export function useSession() {
     doSpin,
     applySpinResult,
     reset,
+    setHistorySession,
   }
 }

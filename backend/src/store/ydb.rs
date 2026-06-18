@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use rand::prelude::IndexedRandom;
 
 use crate::error::AppError;
-use crate::models::{Participant, Session, SpinResult};
+use crate::models::{Action, Participant, SegmentVisual, Session, Snapshot, SpinResult};
 
 use super::Store;
 
@@ -59,6 +59,8 @@ fn participant_from_row(mut row: ydb::Row) -> Result<Participant, ydb::YdbError>
         removed: removed.unwrap_or(false),
         removed_at: removed_at.map(chrono::DateTime::<chrono::Utc>::from),
         spin_order,
+        weight: None,
+        visual: None,
     })
 }
 
@@ -403,5 +405,29 @@ impl Store for YdbStore {
             .await
             .map_err(ydb_err)?;
         outcome.into_result()
+    }
+
+    async fn update_participant_props(
+        &self,
+        _session_id: &str,
+        _participant_id: &str,
+        _weight: Option<f32>,
+        _visual: Option<SegmentVisual>,
+    ) -> Result<Participant, AppError> {
+        Err(AppError::Internal("update_participant_props not yet in ydb (memory first)".into()))
+    }
+
+    async fn append_action(&self, _action: &Action) -> Result<(), AppError> { Ok(()) }
+    async fn list_actions(&self, _session_id: &str, _limit: usize) -> Result<Vec<Action>, AppError> { Ok(vec![]) }
+
+    async fn create_snapshot(&self, _snapshot: &Snapshot) -> Result<(), AppError> { Ok(()) }
+    async fn get_snapshot(&self, _session_id: &str, _before_action_id: Option<&str>) -> Result<Option<Snapshot>, AppError> { Ok(None) }
+
+    async fn restore_from_snapshot(
+        &self,
+        _session_id: &str,
+        _participants: &[Participant],
+    ) -> Result<Vec<Participant>, AppError> {
+        Err(AppError::Internal("restore_from_snapshot not yet in ydb".into()))
     }
 }
