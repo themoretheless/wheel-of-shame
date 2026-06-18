@@ -18,6 +18,10 @@ export function hashName(name: string): number {
 // CSS/three.js-compatible HSL string. Saturation/lightness are tuned to sit in
 // the same pastel range as the legacy COLORS palette so the wheel reads the
 // same on the dark backdrop.
+const colorCache = new Map<string, string>()
 export function identityColor(name: string): string {
-  return `hsl(${hashName(name)}, 62%, 66%)`
+  if (colorCache.has(name)) return colorCache.get(name)!
+  const c = `hsl(${hashName(name)}, 62%, 66%)`
+  colorCache.set(name, c)
+  return c
 }
