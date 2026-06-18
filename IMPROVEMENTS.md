@@ -51,7 +51,16 @@ Additional new ideas poured in this iteration:
 
 All implemented where possible by code changes, rest in design docs ready for PRs.
 
-See design-docs/top-100-ideas.md for the full expanded list of 100 ideas + solutions (synthesized from audit + prior iterations). A few quick wins (pure wheel math, FPS dev, basic prevent-repeat + toggle, export reuse) влиты.
+See design-docs/top-100-ideas.md for the full expanded list of 100 ideas + solutions (synthesized from audit + prior iterations). 
+
+Влиты на ветке pour-all-top-100-ideas:
+- Perf foundations (throttle preview, pure wheel.ts wired into canvas + export, FPS overlay, identityColor cache)
+- UX (equalize weights, improved voice with standard API fallback)
+- Features (mini comments in inspector + add flow)
+- More from audit fixes carried forward
+- Many other items from previous iters already present (inspector, history, weights, templates, analytics, exports, theming, voice base, preview overrides etc.)
+
+Branch ready as the big pour PR. All high value items from the 100 either implemented or documented with solution sketches.
 
 ## Полный аудит проблем (2026-06-18) + fixes + "если с нуля"
 
