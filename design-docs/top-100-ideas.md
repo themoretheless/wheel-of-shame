@@ -2,8 +2,12 @@
 
 **Status (poured on branch pour-all-top-100-ideas):**
 Many ideas implemented or wired in this big "влей всё" pass + previous audit fixes.
-Key poured in this cycle: pure wheel math (2), FPS (6), throttle preview (1), equalize (24), improved voice (22), mini comments (41), basic prevent repeat (42), use shared angles in canvas, etc.
-See commits for details. Full 100 remain as roadmap.
+Key poured in this cycle:
+- Perf: 1 (throttle), 2 (pure math + wire), 6 (FPS)
+- UX: 22 (voice fallback), 24 (equalize button + func)
+- Features: 41 (mini comments in inspector)
+- Plus prevent-repeat enhancement, computeAngles reuse.
+See git log. Full 100 remain as roadmap with many already realized from prior iters.
 
 ---
 
