@@ -280,14 +280,18 @@ export class ThreeWheelRenderer implements WheelRenderer {
     this.isMuted = m
   }
 
-  private playTick() {
+  // Rising-pitch tick: pitch climbs with spin progress (a drumroll into the
+  // landing) and the gain swells on the final slow-mo stretch. progress is the
+  // eased spin t in [0,1]; boost lifts the volume for the last dramatic ticks.
+  private playTick(progress = 0, boost = false) {
     if (this.isMuted || !this.audioCtx) return
     try {
       const o = this.audioCtx.createOscillator()
       const g = this.audioCtx.createGain()
       o.type = 'square'
-      o.frequency.value = 880
-      g.gain.value = 0.02
+      const clamped = progress < 0 ? 0 : progress > 1 ? 1 : progress
+      o.frequency.value = 660 + clamped * 540 // 660Hz -> 1200Hz across the spin
+      g.gain.value = boost ? 0.032 : 0.02
       o.connect(g)
       g.connect(this.audioCtx.destination)
       o.start()
@@ -532,6 +536,17 @@ export class ThreeWheelRenderer implements WheelRenderer {
     this.isSpinAnimating = true
     if (this.controls) this.controls.enabled = false
 
+    // Map wheel-order -> participant id so the per-frame segment-cross logic can
+    // fire onTick/playTick. This list was previously never populated, so the
+    // spin played no ticks at all; lastTickSegment resets so the first cross
+    // after launch always fires a tick.
+    this.spinSegmentIds = this.segmentMeshes.map((m) => m.userData?.participantId)
+    this.lastTickSegment = null
+
+    // Anticipation: compress the wheel a hair so the launch reads as a released
+    // spring. The frame loop eases scale back to 1.0 over the first frames.
+    if (!reduced && this.wheelGroup) this.wheelGroup.scale.set(0.97, 0.97, 1)
+
     const frame = (now: number) => {
       this.markDirty()
       const t = Math.min((now - startT) / dur, 1)
@@ -543,6 +558,13 @@ export class ThreeWheelRenderer implements WheelRenderer {
       this.currentRotation = mainStart + (total - wind) * eased
       if (this.wheelGroup) this.wheelGroup.rotation.z = this.currentRotation
 
+      // Release the anticipation squash back to rest over the first ~12%.
+      if (!reduced && this.wheelGroup) {
+        const rel = Math.min(t / 0.12, 1)
+        const s = 0.97 + 0.03 * rel
+        this.wheelGroup.scale.set(s, s, 1)
+      }
+
       // tick on segment cross
       const rotNorm = ((this.currentRotation % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2)
       const crossed = Math.floor(rotNorm / slice)
@@ -550,20 +572,35 @@ export class ThreeWheelRenderer implements WheelRenderer {
       if (id && id !== this.lastTickSegment) {
         this.lastTickSegment = id
         this.onTick(id)
-        this.playTick()
+        this.playTick(t, t > SLOWMO_START)
       }
 
       if (t < 1) {
         requestAnimationFrame(frame)
       } else {
-        this.currentRotation = target
-        if (this.wheelGroup) this.wheelGroup.rotation.z = target
-        this.isSpinAnimating = false
-        if (this.controls) this.controls.enabled = true
-        this.playThunk()
-        this.onTick(null)
-        onComplete()
-        if (this.onSpinComplete) this.onSpinComplete(winnerId)
+        // Hitstop: a sub-100ms freeze a hair past the resting angle converts the
+        // smooth coast into a felt "landed" hit, then we settle onto target.
+        // Skipped under reduced motion (resolve immediately).
+        const settle = () => {
+          this.currentRotation = target
+          if (this.wheelGroup) {
+            this.wheelGroup.rotation.z = target
+            this.wheelGroup.scale.set(1, 1, 1)
+          }
+          this.isSpinAnimating = false
+          if (this.controls) this.controls.enabled = true
+          this.playThunk()
+          this.onTick(null)
+          onComplete()
+          if (this.onSpinComplete) this.onSpinComplete(winnerId)
+          this.markDirty()
+        }
+        if (reduced) { settle(); return }
+        const overshoot = dir * (0.5 * Math.PI / 180) // ~0.5deg past rest
+        this.currentRotation = target + overshoot
+        if (this.wheelGroup) this.wheelGroup.rotation.z = target + overshoot
+        this.markDirty()
+        setTimeout(settle, 70)
       }
     }
     // wind up stub
@@ -577,7 +614,10 @@ export class ThreeWheelRenderer implements WheelRenderer {
     this.camera.lookAt(0, 0, 0)
     this.controls.update()
     this.currentRotation = 0
-    if (this.wheelGroup) this.wheelGroup.rotation.z = 0
+    if (this.wheelGroup) {
+      this.wheelGroup.rotation.z = 0
+      this.wheelGroup.scale.set(1, 1, 1)
+    }
     this.markDirty()
   }
 

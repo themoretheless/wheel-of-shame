@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, nextTick } from 'vue'
 import type { Action } from '../types'
 
 const props = defineProps<{
@@ -14,6 +14,7 @@ const emit = defineEmits<{
 
 const selectedIndex = ref(-1)
 const isScrubbing = ref(false)
+const listRef = ref<HTMLElement | null>(null)
 
 const visibleActions = computed(() => props.actions.slice().reverse()) // newest first for display
 
@@ -64,6 +65,46 @@ function onActionHover(actionId: string | null) {
   emit('preview', actionId)
 }
 
+// Keep the keyboard-selected row in view as j/k walk a long history.
+function scrollSelectedIntoView() {
+  nextTick(() => {
+    const el = listRef.value?.querySelector<HTMLElement>(
+      `[data-idx="${selectedIndex.value}"]`,
+    )
+    el?.scrollIntoView({ block: 'nearest' })
+  })
+}
+
+// j/k (or arrows) rove the history, each step ghost-previewing that snapshot via
+// the same preview emit hover uses; Enter commits the restore, Escape clears the
+// preview. stopPropagation keeps these keys from reaching the global hotkeys.
+function onListKeydown(e: KeyboardEvent) {
+  const len = visibleActions.value.length
+  if (!len) return
+  if (e.key === 'j' || e.key === 'ArrowDown') {
+    e.preventDefault()
+    e.stopPropagation()
+    const next = selectedIndex.value < 0 ? 0 : Math.min(selectedIndex.value + 1, len - 1)
+    selectAction(next)
+    scrollSelectedIntoView()
+  } else if (e.key === 'k' || e.key === 'ArrowUp') {
+    e.preventDefault()
+    e.stopPropagation()
+    const next = selectedIndex.value < 0 ? 0 : Math.max(selectedIndex.value - 1, 0)
+    selectAction(next)
+    scrollSelectedIntoView()
+  } else if (e.key === 'Enter') {
+    e.preventDefault()
+    e.stopPropagation()
+    commitRestore()
+  } else if (e.key === 'Escape') {
+    e.preventDefault()
+    e.stopPropagation()
+    selectedIndex.value = -1
+    emit('preview', null)
+  }
+}
+
 watch(() => props.actions, () => {
   selectedIndex.value = -1
 })
@@ -72,12 +113,24 @@ watch(() => props.actions, () => {
 <template>
   <div class="history-timeline glass-panel" @mouseleave="onActionHover(null)">
     <h4>History (scrub to preview)</h4>
-    <div class="timeline-list" @mousedown="onScrubStart" @mouseup="onScrubEnd">
+    <div
+      ref="listRef"
+      class="timeline-list"
+      tabindex="0"
+      role="listbox"
+      aria-label="History snapshots, j/k to scrub, Enter to restore"
+      @mousedown="onScrubStart"
+      @mouseup="onScrubEnd"
+      @keydown="onListKeydown"
+    >
       <div
         v-for="(action, index) in visibleActions"
         :key="action.id"
         class="timeline-item"
         :class="{ selected: index === selectedIndex }"
+        :data-idx="index"
+        role="option"
+        :aria-selected="index === selectedIndex"
         @click="selectAction(index)"
         @mouseenter="onActionHover(action.id)"
       >
@@ -88,7 +141,7 @@ watch(() => props.actions, () => {
       <button @click="commitRestore" class="btn">Restore</button>
       <button @click="() => { selectedIndex = -1; onActionHover(null) }" class="btn">Cancel</button>
     </div>
-    <div class="hint">Cmd-Z for undo • hover for preview</div>
+    <div class="hint">Cmd-Z undo • hover or <kbd>j</kbd>/<kbd>k</kbd> preview • <kbd>Enter</kbd> restore</div>
   </div>
 </template>
 

@@ -30,6 +30,37 @@ body {
   border-color: #000;
 }
 
+/* ============================================================
+   Focus system: one keyboard-only ring shared by every
+   interactive surface (dock, roster, history, inspector,
+   swatches, inputs). :focus-visible keeps it off mouse clicks;
+   outline (not box-shadow) is used so the ring is never clipped
+   by the dock's overflow:hidden. Components that used to
+   `outline: none` on :focus now drop that line and inherit the
+   global rules below, so the ring is consistent app-wide.
+   ============================================================ */
+:root {
+  --accent: #4ECDC4;
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 2px;
+}
+
+:focus-visible {
+  outline: var(--focus-ring-width) solid var(--accent);
+  outline-offset: var(--focus-ring-offset);
+}
+
+/* Mouse / touch focus stays ringless; only keyboard focus shows the ring. */
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* High-contrast mode: a thicker, pure-white ring for maximum legibility. */
+.high-contrast :focus-visible {
+  outline-width: 3px;
+  outline-color: #fff;
+}
+
 /* Keycap-style hint chip (e.g. the "Space to spin" shortcut). */
 kbd {
   display: inline-block;

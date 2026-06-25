@@ -1096,7 +1096,6 @@ function onGlobalKeydown(e: KeyboardEvent) {
 
 .title-input:focus {
   border-color: #4ECDC4;
-  outline: none;
 }
 
 .btn {

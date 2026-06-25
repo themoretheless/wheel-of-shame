@@ -413,7 +413,6 @@ function addName() {
 
 .name-input:focus {
   border-color: #4ECDC4;
-  outline: none;
 }
 
 /* Roster filter field: sits between the Active heading and the list. */
@@ -439,7 +438,6 @@ function addName() {
 
 .filter-input:focus {
   border-color: #4ECDC4;
-  outline: none;
 }
 
 .filter-clear {
