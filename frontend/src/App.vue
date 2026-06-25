@@ -55,8 +55,6 @@ const recentsOpen = uiRefs.recentsOpen
 const cameraDrifted = uiRefs.cameraDrifted
 // recap now from spin composable (god removed)
 const themeColor = uiRefs.themeColor
-const spinning = uiRefs.spinning
-const winnerId = uiRefs.winnerId
 const focusedId = uiRefs.focusedId
 const hoverPeekId = uiRefs.hoverPeekId
 
@@ -84,6 +82,14 @@ const spin = useSpin({
   applySpinResult,
   roster,
 })
+
+// The wheel, overlay, and spin-disabled guards must read the SAME spin state the
+// spin flow mutates. useSpin owns spinning/winnerId (set by setPendingSpin); the
+// ui store also declared them but nothing ever wrote them, so binding the wheel
+// to the ui-store refs left every local spin without animation, winner reveal,
+// or the roster update that fires on spin-complete. Bind to the one source here.
+const spinning = spin.spinning
+const winnerId = spin.winnerId
 
 const { startVoiceAdd, voiceSpin } = useVoice(addName, handleSpin)
 
