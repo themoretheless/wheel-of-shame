@@ -11,7 +11,7 @@ const WheelCanvas = defineAsyncComponent({
 import NameList from './components/NameList.vue'
 import SpinResultModal from './components/SpinResult.vue'
 import RecapReel from './components/RecapReel.vue'
-import CommandPalette, { type Command } from './components/CommandPalette.vue'
+import CommandPalette from './components/CommandPalette.vue'
 import ShortcutsSheet from './components/ShortcutsSheet.vue'
 import ToastStack from './components/ToastStack.vue'
 import InspectorPanel from './components/InspectorPanel.vue'
@@ -22,15 +22,46 @@ import { useSession } from './composables/useSession'
 import { useToasts } from './composables/useToasts'
 import { identityColor } from './utils/identity'
 import * as api from './api/client'
-import { exportWheelSVG, captureSpinGIF } from './utils/export'
-import { filterPreventRepeat } from './utils/wheel'
+
+import { simulateSpins, computeAngles } from './utils/wheel'
+import { useComments } from './composables/useComments'
+import { useVoice } from './composables/useVoice'
+import { useFlame } from './composables/useFlame'
+import type { UseHistory } from './composables/useHistory'
+import { useHotkeys } from './composables/useHotkeys'
+import { useCommandPalette } from './composables/useCommandPalette'
+import { useExports } from './composables/useExports'
+import { useSpin } from './composables/useSpin'
+import { useCreateSession } from './composables/useCreateSession'
+
+
+// Fundamental arch change: Pinia stores
+import { useUiStore } from './stores/ui'
+import { useRosterStore } from './stores/roster'
+import { storeToRefs } from 'pinia'
 
 const { push: pushToast } = useToasts()
 
+const ui = useUiStore()
+const roster = useRosterStore()
+const { activeParticipants, removedParticipants } = storeToRefs(roster)
+const uiRefs = storeToRefs(ui)
+
+// Aliases exposed to template + script (no more as any from migration)
+const panelCollapsed = uiRefs.panelCollapsed
+const isEditor = uiRefs.editorEnabled
+const tickingId = uiRefs.tickingId
+const recentsOpen = uiRefs.recentsOpen
+const cameraDrifted = uiRefs.cameraDrifted
+// recap now from spin composable (god removed)
+const themeColor = uiRefs.themeColor
+const spinning = uiRefs.spinning
+const winnerId = uiRefs.winnerId
+const focusedId = uiRefs.focusedId
+const hoverPeekId = uiRefs.hoverPeekId
+
 const {
   session,
-  activeParticipants,
-  removedParticipants,
   loading,
   error,
   remoteSpinResult,
@@ -47,15 +78,30 @@ const {
   history,
 } = useSession()
 
-const titleInput = ref('')
-const templateSelect = ref('') // for templates idea
-const showTemplateGallery = ref(false)
-const SEED_TEMPLATES = [
-  { id: 'retro', title: 'Sprint Retro', names: ['Alice', 'Bob', 'Carol', 'Dave'], weights: [1,1,1,1] },
-  { id: 'critique', title: 'Design Critique', names: ['Lead', 'Dev1', 'Dev2'], weights: [2,1,1] }
-]
-const spinning = ref(false)
-const winnerId = ref<string | null>(null)
+const spin = useSpin({
+  activeParticipants,
+  removedParticipants,
+  applySpinResult,
+  roster,
+})
+
+const { startVoiceAdd, voiceSpin } = useVoice(addName, handleSpin)
+
+const createSessionCtrl = useCreateSession({
+  create,
+  addName,
+  startVoiceAdd,
+  ui,
+})
+
+// rosterStore is the single owner (useSession now delegates)
+
+// from useCreateSession (god removed)
+const titleInput = createSessionCtrl.titleInput
+const templateSelect = createSessionCtrl.templateSelect
+const showTemplateGallery = createSessionCtrl.showTemplateGallery
+const SEED_TEMPLATES = createSessionCtrl.SEED_TEMPLATES
+// Spin state from uiRefs above (storeToRefs)
 const wheelRef = ref<{
   dismissWinner: () => void
   resetView: () => void
@@ -66,130 +112,91 @@ const wheelRef = ref<{
 // Template ref on the roster panel so a global "/" or "n" quick-capture key can
 // focus its name field without the user reaching for the mouse.
 const nameListRef = ref<{ focusInput: () => void } | null>(null)
-const winnerData = ref<{ id: string; name: string; remaining: number } | null>(null)
-// Curtain-call recap: when the final spin leaves a lone survivor, the recap reel
-// is queued here and shown once the winner lower-third is dismissed, so the two
-// overlays never stack. The flag is armed in onSpinComplete and consumed (then
-// shown) in dismissWinner.
-const recapQueued = ref(false)
-const recapOpen = ref(false)
-// True while the orbit camera has been dragged off its resting framing; drives
-// the Snap-home reset pill below the header.
-const cameraDrifted = ref(false)
+void nameListRef // used in template and hotkeys (extracted)
+// spin state owns winnerData, recap etc (god removed)
 
-// Recents switcher: a dropdown next to the session title listing other sessions
-// this browser has visited (from localStorage via useSession), so a returning
-// visitor can hop back without keeping links around. Excludes the current
-// session; picking one loads it and updates the URL hash.
-const recentsOpen = ref(false)
 const otherRecents = computed(() =>
   recentSessions.value.filter((r) => r.id !== session.value?.id),
 )
 
 const analytics = computed(() => {
-  const removed = removedParticipants.value
+  const removed = roster.removedParticipants
   const counts: Record<string, number> = {}
   removed.forEach(p => counts[p.name] = (counts[p.name]||0) +1 )
   return Object.entries(counts).slice(0,2).map(([n,c]) => `${n}:${c}`).join(' ')
 })
 
-const editorEnabled = ref(false)
-function readEditorFlag(): boolean {
-  try { return localStorage.getItem('wheel-editor') === '1' } catch { return false }
-}
-onMounted(() => { editorEnabled.value = readEditorFlag() })
-const isEditor = computed(() => editorEnabled.value)
-function toggleEditor() {
-  editorEnabled.value = !editorEnabled.value
-  try { localStorage.setItem('wheel-editor', editorEnabled.value ? '1' : '0') } catch {}
-}
-
-// Theming (new idea)
-const currentTheme = ref('default')
-function toggleTheme() {
-  currentTheme.value = currentTheme.value === 'default' ? 'high-contrast' : 'default'
-  document.documentElement.className = currentTheme.value
-}
+// Theming and editor now routed through uiStore (Pinia)
+function toggleTheme() { ui.toggleTheme() }
+function updateThemeColor(color: string) { ui.updateThemeColor(color) }
+function toggleEditor() { ui.toggleEditor() }
 function switchSession(id: string) {
-  recentsOpen.value = false
+  ui.closeRecents()
   if (id === session.value?.id) return
   window.location.hash = `#/${id}`
   load(id)
 }
 function toggleRecents() {
-  recentsOpen.value = !recentsOpen.value
+  ui.toggleRecents()
 }
 // Close the recents dropdown when a pointer lands outside the switcher.
 function onDocPointerDown(e: PointerEvent) {
   if (!recentsOpen.value) return
   const target = e.target as Element | null
   if (target && !target.closest('.session-switcher')) {
-    recentsOpen.value = false
+    ui.closeRecents()
   }
 }
-// Participant id whose wheel segment is currently under the pointer mid-spin;
-// NameList flashes the matching roster row in sync. Null when not spinning.
-const tickingId = ref<string | null>(null)
-// Participant id of the roster row the cursor is hovering (null when none).
-const hoverPeekId = ref<string | null>(null)
 
-// Basic comments (mini from top-100 features): participantId -> array of comments
-const comments = ref<Record<string, string[]>>({}) 
+
+// Comments extracted to composable for better separation (audit fix)
+// Pass reactive key so composable reloads per-session local store.
+const commentsSessionKey = computed(() => session.value?.id || 'global')
+const { comments, addComment: _addComment } = useComments(commentsSessionKey)
 function addComment(id: string, text: string) {
-  if (!text.trim()) return
-  if (!comments.value[id]) comments.value[id] = []
-  comments.value[id].push(text.trim())
+  _addComment(id, text)
+  // Record to history for recap/timeline visibility (client-only action)
+  const h = history as UseHistory | undefined
+  if (h?.recordAction && session.value) {
+    h.recordAction({
+      id: 'comment-' + Date.now(),
+      session_id: session.value.id,
+      kind: { type: 'Comment', payload: { participant_id: id, text } },
+      timestamp: new Date().toISOString(),
+    })
+  }
   pushToast('Comment added', 'info')
 }
 
-// Presence: map of peer id to hovered name (mock for demo, in real via WS)
-const presence = ref<Record<string, string>>({})
-// Roving keyboard focus: the participant walked to with Tab/Shift+Tab, lifting
-// its wheel segment without a mouse. Mouse hover takes priority so a real cursor
-// move overrides the keyboard ring.
-const focusedId = ref<string | null>(null)
-// Segment to lift as a peek, forwarded to WheelCanvas. Hover wins over keyboard
-// focus; both feed the same eased lift path on the canvas.
-const peekId = computed(() => hoverPeekId.value ?? focusedId.value)
+const peekId = computed(() => (hoverPeekId.value ?? focusedId.value) as string | null)
 
 // Inspector selection reuses existing focus/hover (v1, no canvas raycast yet)
 const inspectorSelected = computed(() => {
-  const id = focusedId.value || hoverPeekId.value
+  const id = (focusedId.value || hoverPeekId.value) as string | null
   if (!id) return null
   return activeParticipants.value.find(p => p.id === id) ?? null
 })
 
-// Live preview overrides for editor (inspector drag / timeline scrub): temp only, cleared on commit.
-const previewOverrides = ref<Record<string, { weight?: number; visual?: any }>>({})
-let previewThrottle: number | null = null
-function setPreviewOverride(id: string, override: { weight?: number; visual?: any }) {
-  // Throttle full rebuilds during drag (top-100 perf idea)
-  if (previewThrottle) cancelAnimationFrame(previewThrottle)
-  previewThrottle = requestAnimationFrame(() => {
-    previewOverrides.value = { ...previewOverrides.value, [id]: override }
-  })
-}
-function clearPreviewOverrides() {
-  if (previewThrottle) cancelAnimationFrame(previewThrottle)
-  previewOverrides.value = {}
-}
-
-async function setPreviewOverrideFromHistory(actionId: string) {
+// History-scrub preview routes through the roster store's single preview map so
+// the wheel (which reads roster.previewOverrides) actually reflects the hovered
+// snapshot. A second usePreview() instance here would write to a map nothing
+// renders.
+async function previewFromHistory(actionId: string) {
   if (!session.value) return
   try {
     const snap = await api.getSnapshot(session.value.id, actionId)
     if (snap && snap.participants) {
-      clearPreviewOverrides()
+      roster.clearPreviews()
       for (const p of snap.participants) {
-        if (p.weight !== undefined) {
-          setPreviewOverride(p.id, { weight: p.weight })
-        }
+        if (p.weight !== undefined) roster.previewWeight(p.id, p.weight)
       }
     }
   } catch {
-    // fallback demo
-    if (activeParticipants.value.length > 0) {
-      setPreviewOverride(activeParticipants.value[0].id, { weight: 0.5 })
+    const h = history as { actions?: { value?: Array<{ id: string }> } } | undefined
+    const len = h?.actions?.value?.length || 0
+    if (len > 0) {
+      const first = (h!.actions!.value as Array<{ id: string }>)[0]
+      roster.previewWeight(first.id, 0.5)
     }
   }
 }
@@ -197,14 +204,24 @@ async function setPreviewOverrideFromHistory(actionId: string) {
 // AI weights suggestion (new idea - mock based on history length)
 async function suggestAIWeights() {
   if (!activeParticipants.value.length || !session.value) return
-  const bias = 1 + (removedParticipants.value.length % 3) * 0.5 // mock
-  // Apply via the real path so optimistic + record + api + WS
-  for (let i = 0; i < activeParticipants.value.length; i++) {
-    const p = activeParticipants.value[i]
-    const w = i === 0 ? bias : 1
-    await handleUpdateWeight(p.id, w).catch(() => {})
+  // Heavy simulation now via worker when possible (fundamental perf requirement)
+  let picks: string[]
+  try {
+    picks = await roster.simulateHeavy(20)
+  } catch {
+    picks = simulateSpins(activeParticipants.value as { id: string; weight?: number }[], 20)
   }
-  pushToast('AI suggested bias for first', 'info')
+  // Find the least picked recently and bias it
+  const counts: Record<string, number> = {}
+  picks.forEach(id => { counts[id] = (counts[id] || 0) + 1 })
+  let target = activeParticipants.value[0].id
+  let min = Infinity
+  activeParticipants.value.forEach(p => {
+    const c = counts[p.id] || 0
+    if (c < min) { min = c; target = p.id }
+  })
+  await handleUpdateWeight(target, 2.5).catch(() => {})
+  pushToast('AI suggested bias (least recent)', 'info')
 }
 
 // Equalize / reset all weights (top 100 UX idea)
@@ -219,23 +236,9 @@ async function equalizeWeights() {
 }
 
 function handleReorder(from: number, to: number) {
-  const list = [...activeParticipants.value]
-  const [moved] = list.splice(from, 1)
-  list.splice(to, 0, moved)
-  // For now, just reorder local; in full would call backend reorder
-  // Simulate by re-creating, but since ref, mutate
-  activeParticipants.value.splice(0, activeParticipants.value.length, ...list)
-  pushToast(`Reordered ${moved.name}`, 'info')
-  // Record action
-  const h: any = history
-  if (h?.recordAction) {
-    h.recordAction({
-      id: 'local-' + Date.now(),
-      session_id: session.value?.id || '',
-      kind: { type: 'Reorder', payload: { from, to } },
-      timestamp: new Date().toISOString(),
-    })
-  }
+  roster.reorder(from, to)
+  pushToast(`Reordered`, 'info')
+  // history recording delegated to roster events where possible
 }
 // Spoken label for the keyboard focus ring, mirrored into an aria-live region so
 // screen readers hear the focused name and its odds as Tab walks the roster.
@@ -244,7 +247,11 @@ const focusAnnounce = computed(() => {
   if (!id) return ''
   const hit = activeParticipants.value.find((p) => p.id === id)
   if (!hit) return ''
-  const odds = Math.round(100 / activeParticipants.value.length)
+  // Use shared util (no more hard 1/N)
+  const angles = computeAngles(activeParticipants.value)
+  const total = angles.reduce((a, b) => a + b, 0) || 1
+  const idx = activeParticipants.value.findIndex((p) => p.id === id)
+  const odds = Math.round(((angles[idx] || 0) / total) * 100)
   return `${hit.name}, ${odds}% chance`
 })
 // Identity color of the segment currently under the pointer, pulled through the
@@ -274,260 +281,56 @@ function toggleSound() {
   wheelRef.value?.toggleMute()
   soundMuted.value = wheelRef.value?.isMuted.value ?? !soundMuted.value
 }
-let isLocalSpin = false
-let pendingSpinResult: import('./types').SpinResult | null = null
+// spin state from useSpin composable (god logic removed)
 
-const flameCanvas = ref<HTMLCanvasElement | null>(null)
-let flameAnimId = 0
-let flameCleanup: (() => void) | null = null
-// Timestamp (performance.now ms) until which the title flame flares hotter:
-// set on a winner reveal so the header briefly surges brighter and larger in
-// sympathy with the result, then decays back to its idle blaze. Read inside
-// the flame loop; module-level so onWinnerReveal can poke it.
-let flareUntil = 0
-const FLARE_MS = 900
 
-interface Particle {
-  x: number
-  y: number
-  vx: number
-  vy: number
-  life: number
-  maxLife: number
-  size: number
-  drift?: boolean
-  // Flare strength (0..1) captured at spawn time; biases this ember brighter
-  // and whiter so a winner-reveal surge reads hotter than the idle blaze.
-  flare?: number
-}
+// flare() provided by useFlame; canvas ref wired below via destructured ref.
 
-// Scanning the full canvas with getImageData on every resize is expensive;
-// the edge points only depend on the canvas size, so cache by dimensions.
-// Bounded: a long session with many window sizes would otherwise keep every
-// point array forever.
-const edgePointsCache = new Map<string, [number, number][]>()
-const EDGE_POINTS_CACHE_LIMIT = 12
 
-function getTextEdgePoints(w: number, h: number): [number, number][] {
-  const key = `${w}x${h}`
-  const cached = edgePointsCache.get(key)
-  if (cached) return cached
-  const points = computeTextEdgePoints(w, h)
-  if (edgePointsCache.size >= EDGE_POINTS_CACHE_LIMIT) {
-    edgePointsCache.delete(edgePointsCache.keys().next().value!)
-  }
-  edgePointsCache.set(key, points)
-  return points
-}
 
-function computeTextEdgePoints(w: number, h: number): [number, number][] {
-  // A 0-sized offscreen canvas makes getImageData throw IndexSizeError; bail to
-  // an empty set so a not-yet-laid-out header never crashes flame init.
-  if (w < 1 || h < 1) return []
-  const off = document.createElement('canvas')
-  off.width = w
-  off.height = h
-  const octx = off.getContext('2d')!
-  octx.clearRect(0, 0, w, h)
-  octx.font = 'bold 42px Inter, system-ui, sans-serif'
-  octx.textAlign = 'center'
-  octx.textBaseline = 'middle'
-  octx.fillStyle = '#fff'
-  octx.fillText('Wheel of Shame', w / 2, h / 2)
+// Late composables to avoid declaration order issues (god logic extracted)
+const cmdPalette = useCommandPalette({
+  activeParticipants,
+  spinning,
+  removedParticipants,
+  session,
+  soundMuted,
+  toggleSound,
+  handleSpin,
+  reset,
+  copyLink,
+  handleRemove,
+  addName,
+})
 
-  const imgData = octx.getImageData(0, 0, w, h)
-  const pixels = imgData.data
-  const points: [number, number][] = []
+const paletteCommands = cmdPalette.paletteCommands
 
-  // Find edge pixels: alpha > 0 but has a transparent neighbor
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
-      const idx = (y * w + x) * 4
-      const a = pixels[idx + 3]
-      if (a < 80) continue
+const exports = useExports({
+  session,
+  activeParticipants,
+  removedParticipants,
+  analytics,
+  wheelRef,
+  pushToast,
+})
 
-      const top = pixels[((y - 1) * w + x) * 4 + 3]
-      const bot = pixels[((y + 1) * w + x) * 4 + 3]
-      const lft = pixels[(y * w + x - 1) * 4 + 3]
-      const rgt = pixels[(y * w + x + 1) * 4 + 3]
-
-      if (top < 80 || bot < 80 || lft < 80 || rgt < 80) {
-        points.push([x, y])
-      }
-    }
-  }
-  return points
-}
-
-function initFlame() {
-  const canvasEl = flameCanvas.value
-  if (!canvasEl) return
-  const canvas: HTMLCanvasElement = canvasEl
-  const ctx = canvas.getContext('2d')!
-
-  const particles: Particle[] = []
-  let edgePoints: [number, number][] = []
-  // The canvas extends EMBER_DRIFT px below the header so the rare drifting
-  // ember can fade out over the wheel region. The title text and its edge
-  // points stay anchored to the header band (the top headerH px), so this
-  // extra height never repositions the flame.
-  const EMBER_DRIFT = 280
-  let headerH = 0
-
-  let sizeRetry: number | undefined
-  function resize() {
-    const header = canvas.parentElement
-    if (!header) return
-    headerH = header.clientHeight
-    canvas.width = header.clientWidth
-    canvas.height = headerH + EMBER_DRIFT
-    // Display the canvas buffer 1:1 so the flame isn't stretched: width fills
-    // the header (== buffer width), height matches the buffer's drift-extended
-    // height and spills below the header band.
-    canvas.style.height = `${canvas.height}px`
-    // On a cold load the header may not be laid out yet (clientWidth 0). Sampling
-    // text edges from a 0-width canvas throws, so skip it and retry next frame
-    // until the header has a real size; the flame simply waits to ignite.
-    if (canvas.width < 1 || headerH < 1) {
-      sizeRetry = requestAnimationFrame(resize)
-      return
-    }
-    sizeRetry = undefined
-    edgePoints = getTextEdgePoints(canvas.width, headerH)
-  }
-  resize()
-
-  // Debounce: a window drag fires resize continuously; only recompute once it
-  // settles. Cleanup removes the listener and pending timer on unmount.
-  let resizeTimer: ReturnType<typeof setTimeout> | undefined
-  const onResize = () => {
-    clearTimeout(resizeTimer)
-    resizeTimer = setTimeout(resize, 150)
-  }
-  window.addEventListener('resize', onResize)
-  flameCleanup = () => {
-    window.removeEventListener('resize', onResize)
-    clearTimeout(resizeTimer)
-    if (sizeRetry !== undefined) cancelAnimationFrame(sizeRetry)
-  }
-
-  // Reduced motion: thin the flame to a low flicker rather than a full blaze.
-  const reducedMotion = typeof window.matchMedia === 'function'
-    && window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  const spawnPerFrame = reducedMotion ? 1 : 4
-
-  // 0 at rest, ramping to 1 right after a reveal and easing back to 0 across
-  // FLARE_MS. Reduced motion stays calm, so the flare never kicks in there.
-  function flareStrength(): number {
-    if (reducedMotion) return 0
-    const remain = flareUntil - performance.now()
-    if (remain <= 0) return 0
-    return Math.min(1, remain / FLARE_MS)
-  }
-
-  function spawn() {
-    if (edgePoints.length === 0) return
-    // During a flare, throw off up to ~2.5x the embers and start them larger.
-    const flare = flareStrength()
-    const count = Math.round(spawnPerFrame * (1 + flare * 1.5))
-    for (let i = 0; i < count; i++) {
-      const pt = edgePoints[Math.floor(Math.random() * edgePoints.length)]
-      // ~2% of embers break loose and drift down past the header into the
-      // wheel region: a gentle downward drift and a much longer life so they
-      // survive the fall before fading. Reduced motion keeps the flame calm,
-      // so no drifters there.
-      const drifter = !reducedMotion && Math.random() < 0.02
-      particles.push({
-        x: pt[0],
-        y: pt[1],
-        vx: (Math.random() - 0.5) * 0.6,
-        vy: drifter ? 0.3 + Math.random() * 0.5 : -(0.8 + Math.random() * 1.8),
-        life: 0,
-        maxLife: drifter ? 160 + Math.random() * 80 : 20 + Math.random() * 30,
-        size: (4 + Math.random() * 10) * (1 + flare * 0.6),
-        drift: drifter,
-        flare,
-      })
-    }
-  }
-
-  function loop() {
-    ctx.clearRect(0, 0, canvas.width, canvas.height)
-    spawn()
-
-    for (let i = particles.length - 1; i >= 0; i--) {
-      const p = particles[i]
-      p.life++
-      p.x += p.vx + (Math.random() - 0.5) * 0.4
-      p.y += p.vy
-      if (p.drift) {
-        // Drifters keep falling: a touch of downward pull (capped) instead of
-        // the rising flame's drag, and a far gentler shrink so they reach the
-        // wheel before winking out.
-        p.vy = Math.min(p.vy + 0.012, 1.0)
-        p.size *= 0.995
-      } else {
-        p.vy *= 0.97
-        p.size *= 0.98
-      }
-      p.vx += (Math.random() - 0.5) * 0.1
-
-      if (p.life >= p.maxLife || p.size < 0.5) {
-        particles.splice(i, 1)
-        continue
-      }
-
-      const t = p.life / p.maxLife
-      const alpha = t < 0.15 ? t / 0.15 : 1 - ((t - 0.15) / 0.85)
-
-      let r: number, g: number, b: number
-      if (t < 0.2) {
-        r = 255; g = 255 - t * 400; b = 50 * (1 - t * 5)
-      } else if (t < 0.5) {
-        const st = (t - 0.2) / 0.3
-        r = 255; g = 155 * (1 - st); b = 0
-      } else if (t < 0.8) {
-        const st = (t - 0.5) / 0.3
-        r = 255 - st * 120; g = 0; b = 0
-      } else {
-        const st = (t - 0.8) / 0.2
-        r = 135 - st * 80; g = st * 20; b = st * 20
-      }
-
-      // Flare bias: pull the cooler channels up toward white-hot so a reveal
-      // surge glows brighter, scaled by the strength captured at spawn time.
-      const f = p.flare ?? 0
-      if (f > 0) {
-        g += (255 - g) * 0.6 * f
-        b += (200 - b) * 0.6 * f
-      }
-
-      ctx.save()
-      ctx.globalAlpha = Math.min(1, alpha * (0.8 + 0.25 * f))
-      ctx.translate(p.x, p.y)
-
-      const s = p.size
-      ctx.beginPath()
-      ctx.moveTo(0, -s * 1.2)
-      ctx.bezierCurveTo(s * 0.5, -s * 0.4, s * 0.4, s * 0.3, 0, s * 0.5)
-      ctx.bezierCurveTo(-s * 0.4, s * 0.3, -s * 0.5, -s * 0.4, 0, -s * 1.2)
-      ctx.closePath()
-
-      const grad = ctx.createRadialGradient(0, -s * 0.3, 0, 0, -s * 0.3, s)
-      grad.addColorStop(0, `rgba(${r},${g},${b},1)`)
-      grad.addColorStop(0.5, `rgba(${r},${g},${b},0.4)`)
-      grad.addColorStop(1, `rgba(${r},${g},${b},0)`)
-      ctx.fillStyle = grad
-      ctx.fill()
-
-      ctx.restore()
-    }
-
-    flameAnimId = requestAnimationFrame(loop)
-  }
-
-  flameAnimId = requestAnimationFrame(loop)
-}
+const hotkeys = useHotkeys({
+  activeParticipants,
+  spinning,
+  winnerData: spin.winnerData,
+  recapOpen: spin.recapOpen,
+  paletteOpen: cmdPalette.paletteOpen,
+  shortcutsOpen: cmdPalette.shortcutsOpen,
+  recentsOpen,
+  focusedId,
+  hoverPeekId,
+  handleSpin,
+  dismissWinner,
+  cycleFocus: (_dir: 1 | -1) => {},
+  nameListRef,
+  history,
+  isEditor,
+})
 
 onMounted(() => {
   const hash = window.location.hash
@@ -535,14 +338,12 @@ onMounted(() => {
     const id = hash.slice(2)
     if (id) load(id)
   }
-  initFlame()
+  // flame inited inside useFlame
   window.addEventListener('keydown', onGlobalKeydown)
   window.addEventListener('pointerdown', onDocPointerDown)
 })
 
 onBeforeUnmount(() => {
-  cancelAnimationFrame(flameAnimId)
-  flameCleanup?.()
   window.removeEventListener('keydown', onGlobalKeydown)
   window.removeEventListener('pointerdown', onDocPointerDown)
 })
@@ -554,28 +355,15 @@ onBeforeUnmount(() => {
 // removed on spin-complete.
 watch(remoteSpinResult, (result) => {
   if (!result) return
-  // Ignore our own spin (handled by the local path) and don't interrupt an
-  // animation already in flight; apply the latter directly so it isn't lost.
-  if (isLocalSpin) {
-    remoteSpinResult.value = null
-    return
-  }
-  if (spinning.value) {
-    applySpinResult(result)
-    remoteSpinResult.value = null
-    return
-  }
-  pendingSpinResult = result
-  winnerId.value = result.picked.id
-  spinning.value = true
+  spin.setRemoteSpin(result)
 })
 
 // A reset (or switching sessions) clears the picked list; tear down any pending
 // or open recap so a fresh game never inherits a stale curtain call.
 watch(removedParticipants, (removed) => {
   if (removed.length === 0) {
-    recapQueued.value = false
-    recapOpen.value = false
+    spin.recapQueued.value = false
+    spin.recapOpen.value = false
   }
 })
 
@@ -583,122 +371,60 @@ watch(removedParticipants, (removed) => {
 // spin, removed by hand, or cleared on reset) so the ring never points at a
 // stale segment.
 watch(activeParticipants, (list) => {
-  if (focusedId.value && !list.some((p) => p.id === focusedId.value)) {
+  const fid = focusedId.value
+  if (fid && !list.some((p) => p.id === fid)) {
     focusedId.value = null
   }
 })
 
-async function createSession() {
-  const title = titleInput.value.trim()
-  if (!title) return
-  const tmpl = SEED_TEMPLATES.find(t => t.id === templateSelect.value)
-  await create(tmpl ? tmpl.title : title)
-  if (tmpl) {
-    // apply template names and weights (demo)
-    for (const name of tmpl.names) {
-      await addName(name)
-    }
-    // weights would be set via inspector or future
-  }
-  titleInput.value = ''
-  templateSelect.value = ''
-}
+const createSession = createSessionCtrl.createSession
 
-// Voice input (improved with standard + webkit fallback - top 100 UX)
-function getSpeechRecognition() {
-  const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
-  if (!SR) return null
-  const rec = new SR()
-  rec.lang = 'ru-RU,en-US'
-  rec.continuous = false
-  rec.interimResults = false
-  return rec
-}
 
-function startVoiceAdd() {
-  const recognition = getSpeechRecognition()
-  if (!recognition) {
-    pushToast('Voice not supported', 'info')
-    return
-  }
-  recognition.onresult = (event: any) => {
-    const name = event.results[0][0].transcript.trim()
-    if (name) addName(name)
-  }
-  recognition.onerror = () => pushToast('Voice error', 'info')
-  recognition.start()
-  pushToast('Listening for name...', 'info')
-}
-
-function voiceSpin() {
-  const recognition = getSpeechRecognition()
-  if (!recognition) {
-    pushToast('Voice not supported', 'info')
-    return
-  }
-  recognition.onresult = (event: any) => {
-    const cmd = event.results[0][0].transcript.trim().toLowerCase()
-    if (cmd.includes('spin') || cmd.includes('крутить') || cmd.includes('крути')) {
-      handleSpin()
-    }
-  }
-  recognition.onerror = () => pushToast('Voice error', 'info')
-  recognition.start()
-  pushToast('Say "spin" or "крутить"...', 'info')
-}
-
-// Simple local rule demo (top-100 ideas): prevent immediate repeat
-const preventRepeat = ref(true)
-let lastPickedId: string | null = null
 
 async function handleSpin() {
-  if (spinning.value || activeParticipants.value.length === 0) return
+  if (!spin.handleSpinStart()) return
 
-  let candidates = activeParticipants.value
-  if (preventRepeat.value && lastPickedId) {
-    const filtered = filterPreventRepeat(candidates as any, lastPickedId)
-    if (filtered.length > 0) candidates = filtered as any
-  }
-
-  // For demo we still call the real doSpin (server decides), but the filter shows intent.
-  // Real rules should live in backend doSpin path (see top-100 #42).
-  isLocalSpin = true
   const result = await doSpin()
   if (!result) {
-    isLocalSpin = false
+    spin.setIsLocalSpin(false)
     return
   }
 
-  lastPickedId = result.picked.id
-  // Store result but don't apply yet — participant stays active during animation
-  pendingSpinResult = result
-  winnerId.value = result.picked.id
-  spinning.value = true
+  roster.setLastPicked(result.picked.id)
+  spin.setPendingSpin(result)
   // The spin owns the wheel now, so retire the keyboard focus ring.
   focusedId.value = null
 }
 
+// Prevent-repeat state lives in the roster store (single source of truth). App
+// reads roster.preventRepeat / roster.lastPickedId and mutates via
+// roster.togglePreventRepeat / roster.setLastPicked. A local usePreventRepeat()
+// here would flip a ref the wheel never reads, so the dock toggle would no-op.
+
+// Voice extracted to composable (reduce monolith) - already declared above
+
+// Flame extracted (header ember effect, capped loop)
+const { flameCanvas, flare } = useFlame()
+void flameCanvas // referenced via template ref binding for the canvas element
+
 function onWinnerReveal(data: { id: string; name: string; remaining: number }) {
-  winnerData.value = data
-  // Kick the title flame into a brief hotter flare in sympathy with the reveal.
-  flareUntil = performance.now() + FLARE_MS
+  spin.onWinnerReveal(data)
+  // Kick the title flame (extracted composable handles capped loop + decay).
+  flare(900)
 }
 
 function onCameraDrifted(drifted: boolean) {
-  cameraDrifted.value = drifted
+  ui.setCameraDrifted(drifted)
 }
 
 function onTickSegment(participantId: string | null) {
-  tickingId.value = participantId
+  ui.setTickingId(participantId)
 }
 
 function onHoverName(id: string | null) {
-  hoverPeekId.value = id
-  // A real hover supersedes the keyboard ring, so Tab focus doesn't linger on a
-  // different segment than the one the cursor is over.
-  if (id) focusedId.value = null
+  ui.setHoverPeekId(id)
   // Presence mock: set self hover
-  presence.value['self'] = id ? (activeParticipants.value.find(p => p.id === id)?.name || '') : ''
+  ui.presence['self'] = id ? (activeParticipants.value.find(p => p.id === id)?.name || '') : ''
 }
 
 function resetView() {
@@ -706,30 +432,12 @@ function resetView() {
 }
 
 function dismissWinner() {
-  winnerData.value = null
+  spin.dismissWinner()
   wheelRef.value?.dismissWinner()
-  // If that was the final elimination, roll the curtain-call recap now that the
-  // winner card is out of the way.
-  if (recapQueued.value) {
-    recapQueued.value = false
-    recapOpen.value = true
-  }
 }
 
 function onSpinComplete(_participantId: string) {
-  if (pendingSpinResult) {
-    applySpinResult(pendingSpinResult)
-    pendingSpinResult = null
-  }
-  spinning.value = false
-  winnerId.value = null
-  isLocalSpin = false
-  remoteSpinResult.value = null
-  // Game over: one name left on the wheel and at least one already picked. Arm
-  // the recap so it plays when the winner lower-third is dismissed.
-  if (activeParticipants.value.length <= 1 && removedParticipants.value.length > 0) {
-    recapQueued.value = true
-  }
+  spin.onSpinComplete(_participantId)
 }
 
 function copyLink() {
@@ -761,47 +469,8 @@ function copyRecapImage(ok: boolean) {
   )
 }
 
-async function exportWheel() {
-  if (!session.value) return
-  const svg = await exportWheelSVG(activeParticipants.value, session.value.title)
-  const blob = new Blob([svg], { type: 'image/svg+xml' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `${session.value.title}-wheel.svg`
-  a.click()
-  URL.revokeObjectURL(url)
-  pushToast('Wheel SVG exported', 'success')
-}
-
-async function exportSpin() {
-  const canvas = wheelRef.value?.captureCanvas?.()
-  if (canvas) {
-    const blob = await captureSpinGIF(canvas, 1500)
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = 'spin.webm'
-    a.click()
-    URL.revokeObjectURL(url)
-    pushToast('Spin capture exported', 'success')
-  } else {
-    pushToast('Could not capture spin', 'info')
-  }
-}
-
-async function exportPDF() {
-  // Mock PDF report
-  const content = `Wheel Report: ${session.value?.title}\nRemoved: ${removedParticipants.value.length}\nAnalytics: ${analytics.value}\nWeights: ${activeParticipants.value.map(p => `${p.name}:${p.weight||1}`).join(', ')}`
-  const blob = new Blob([content], { type: 'text/plain' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = 'report.txt'
-  a.click()
-  URL.revokeObjectURL(url)
-  pushToast('Report exported (mock PDF)', 'success')
-}
+// Exports now from useExports composable (god removed)
+const { exportWheel, exportSpin, exportPDF } = exports
 
 // Deliberate manual removal (roster X or the palette's Eliminate command), as
 // opposed to a spin elimination which goes through applySpinResult. Captures the
@@ -818,23 +487,22 @@ function handleRemove(id: string) {
   })
 }
 
-// Minimal inspector handlers (additive, behind flag in usage)
+// Inspector handlers now go through roster store (central state)
 function handlePreviewWeight(id: string, weight: number) {
-  // Live only during drag - no api/record, just override for Wheel preview.
-  setPreviewOverride(id, { weight })
+  roster.previewWeight(id, weight)
 }
 
 async function handleUpdateWeight(id: string, weight: number) {
-  clearPreviewOverrides()
-  const p = activeParticipants.value.find((pp) => pp.id === id)
-  if (p) p.weight = weight
-  if ((history as any)?.recordAction) {
-    ;(history as any).recordAction({
+  await roster.updateWeight(id, weight)
+
+  const h = history as UseHistory | undefined
+  if (h?.recordAction && session.value) {
+    h.recordAction({
       id: 'local-' + Date.now(),
-      session_id: session.value?.id || '',
+      session_id: session.value.id,
       kind: { type: 'UpdateWeight', payload: { id, weight } },
       timestamp: new Date().toISOString(),
-    } as any)
+    })
   }
   try {
     if (session.value) {
@@ -846,16 +514,17 @@ async function handleUpdateWeight(id: string, weight: number) {
 }
 
 async function handleUpdateVisual(id: string, visual: any) {
-  clearPreviewOverrides()
+  roster.clearPreviews()
   const p = activeParticipants.value.find((pp) => pp.id === id)
-  if (p) p.visual = visual
-  if ((history as any)?.recordAction) {
-    ;(history as any).recordAction({
+  if (p) p.visual = visual   // still direct for visual until full migration
+  const h = history as UseHistory | undefined
+  if (h?.recordAction && session.value) {
+    h.recordAction({
       id: 'local-' + Date.now(),
-      session_id: session.value?.id || '',
+      session_id: session.value.id,
       kind: { type: 'UpdateVisual', payload: { id, visual } },
       timestamp: new Date().toISOString(),
-    } as any)
+    })
   }
   try {
     if (session.value) {
@@ -867,209 +536,16 @@ async function handleUpdateVisual(id: string, visual: any) {
 }
 
 // --- Command palette (Cmd-K / Ctrl-K) ---
-const paletteOpen = ref(false)
+// palette and shortcuts from composables (god removed)
 
-// Keyboard cheat-sheet toggled with '?'. Its rows mirror onGlobalKeydown below.
-const shortcutsOpen = ref(false)
 
-const paletteCommands = computed<Command[]>(() => [
-  {
-    id: 'spin',
-    label: 'Spin the wheel',
-    hint: 'Spin',
-    group: 'Actions',
-    disabled: spinning.value || activeParticipants.value.length === 0,
-    run: () => {
-      handleSpin()
-    },
-  },
-  {
-    id: 'add',
-    label: 'Add a name',
-    hint: 'New participant',
-    group: 'Actions',
-    disabled: !session.value,
-    // Opens an inline glass field in the palette rather than a native prompt;
-    // returning false keeps it open so several names can be added in a row.
-    run: () => {},
-    inline: {
-      placeholder: 'Name to add...',
-      submit: (name) => {
-        addName(name)
-        return false
-      },
-    },
-  },
-  {
-    id: 'reset',
-    label: 'Reset the wheel',
-    hint: 'Restore everyone',
-    group: 'Actions',
-    disabled: !session.value || removedParticipants.value.length === 0,
-    run: () => {
-      reset()
-    },
-  },
-  {
-    id: 'copy-link',
-    label: 'Copy share link',
-    hint: 'Share',
-    group: 'Actions',
-    disabled: !session.value,
-    run: () => {
-      copyLink()
-    },
-  },
-  {
-    id: 'toggle-sound',
-    label: soundMuted.value ? 'Unmute spin sound' : 'Mute spin sound',
-    hint: soundMuted.value ? 'Unmute' : 'Mute',
-    group: 'Actions',
-    run: () => {
-      toggleSound()
-    },
-  },
-  {
-    id: 'templates',
-    label: 'Load template',
-    hint: 'Presets',
-    group: 'Actions',
-    disabled: !session.value,
-    run: () => {
-      // For demo, load first template
-      const tmpl = SEED_TEMPLATES[0]
-      if (tmpl) {
-        titleInput.value = tmpl.title
-        templateSelect.value = tmpl.id
-        createSession()
-      }
-    },
-  },
-  // One spotlight command per active participant: type a name into Cmd-K and
-  // the fuzzy scorer floats the match to the top, then Enter eliminates them.
-  ...activeParticipants.value.map((p): Command => {
-    const odds = Math.round(100 / activeParticipants.value.length)
-    return {
-      id: `remove-${p.id}`,
-      label: `Eliminate ${p.name}`,
-      subtitle: `${odds}% to be picked next`,
-      hint: 'Remove',
-      group: 'Eliminate',
-      run: () => {
-        handleRemove(p.id)
-      },
-    }
-  }),
-])
 
-// True when the keystroke targets a text field (name input, palette, etc.),
-// so global shortcuts don't hijack normal typing: a space in a name should
-// insert a space, not spin the wheel.
-function isEditableTarget(target: EventTarget | null): boolean {
-  const el = target as HTMLElement | null
-  if (!el) return false
-  const tag = el.tagName
-  return tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable
-}
 
-// Roving focus ring: step the keyboard-lifted segment to the next/previous
-// active name, wrapping at the ends. A fresh walk (nothing focused yet) starts
-// at the first name forward / last name backward. Clears the mouse peek so the
-// ring is the sole highlight while the keyboard drives it.
-function cycleFocus(dir: 1 | -1) {
-  const list = activeParticipants.value
-  if (list.length === 0) {
-    focusedId.value = null
-    return
-  }
-  hoverPeekId.value = null
-  const current = list.findIndex((p) => p.id === focusedId.value)
-  let next: number
-  if (current === -1) {
-    next = dir === 1 ? 0 : list.length - 1
-  } else {
-    next = (current + dir + list.length) % list.length
-  }
-  focusedId.value = list[next].id
-}
-
+// onGlobalKeydown thin wrapper (god removed)
+// Hotkeys logic extracted to composable (god removed)
+// This is a thin delegator
 function onGlobalKeydown(e: KeyboardEvent) {
-  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
-    e.preventDefault()
-    paletteOpen.value = !paletteOpen.value
-    return
-  }
-  // The command palette owns the keyboard while it's open (Escape closes it).
-  if (paletteOpen.value) return
-
-  // Escape closes the recents switcher first if it's open, so the key doesn't
-  // also dismiss the winner modal underneath.
-  if (recentsOpen.value && e.key === 'Escape') {
-    e.preventDefault()
-    recentsOpen.value = false
-    return
-  }
-
-  // The cheat-sheet captures Escape to close itself; everything else is inert
-  // beneath it, so handle that case before the shortcuts it documents.
-  if (shortcutsOpen.value) {
-    if (e.key === 'Escape') {
-      e.preventDefault()
-      shortcutsOpen.value = false
-    }
-    return
-  }
-
-  if (e.key === '?' && !isEditableTarget(e.target)) {
-    e.preventDefault()
-    shortcutsOpen.value = true
-  } else if (
-    (e.key === '/' || e.key === 'n') &&
-    !e.metaKey &&
-    !e.ctrlKey &&
-    !e.altKey &&
-    !isEditableTarget(e.target)
-  ) {
-    // Quick-capture: jump straight to the roster's name field. Guarded against
-    // modifiers so Cmd/Ctrl+N (new window) and friends still reach the browser.
-    // No-ops on the create screen, where the roster panel isn't mounted yet.
-    e.preventDefault()
-    nameListRef.value?.focusInput()
-  } else if (
-    e.key === 'Tab' &&
-    !e.metaKey &&
-    !e.ctrlKey &&
-    !e.altKey &&
-    !isEditableTarget(e.target) &&
-    !winnerData.value &&
-    !recapOpen.value &&
-    !spinning.value &&
-    activeParticipants.value.length > 0
-  ) {
-    // Roving focus ring: Tab walks the wheel forward, Shift+Tab backward,
-    // lifting each segment in turn so the roster can be explored without a mouse.
-    // Held back while a spin/overlay owns the wheel.
-    e.preventDefault()
-    cycleFocus(e.shiftKey ? -1 : 1)
-  } else if (e.code === 'Space' && !isEditableTarget(e.target)) {
-    e.preventDefault()
-    // Don't spin underneath the winner modal or the recap reel: Space is inert
-    // until whichever overlay is up has been dismissed.
-    if (!winnerData.value && !recapOpen.value) handleSpin()
-  } else if (e.key === 'Escape' && recapOpen.value) {
-    e.preventDefault()
-    recapOpen.value = false
-  } else if (e.key === 'Escape' && winnerData.value) {
-    e.preventDefault()
-    dismissWinner()
-  } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z' && !isEditableTarget(e.target)) {
-    e.preventDefault()
-    if (e.shiftKey) {
-      // redo future
-    } else if ((history as any)?.undo) {
-      ;(history as any).undo()
-    }
-  }
+  hotkeys.onGlobalKeydown(e)
 }
 </script>
 
@@ -1081,7 +557,10 @@ function onGlobalKeydown(e: KeyboardEvent) {
     :spinning="spinning"
     :winner-id="winnerId"
     :peek-id="peekId"
-    :preview-overrides="previewOverrides"
+    :preview-overrides="roster.previewOverrides"
+    :last-picked-id="roster.lastPickedId"
+    :prevent-repeat="roster.preventRepeat"
+    :prepared-segments="roster.preparedSegments"
     @spin-complete="onSpinComplete"
     @spin-click="handleSpin"
     @winner-reveal="onWinnerReveal"
@@ -1092,7 +571,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
   <!-- UI overlay -->
   <div
     class="overlay"
-    :class="{ spinning, 'palette-dimmed': paletteOpen }"
+    :class="{ spinning, 'palette-dimmed': cmdPalette.paletteOpen.value }"
     :style="{ '--live-accent': liveAccent }"
   >
     <header class="fire-header">
@@ -1192,7 +671,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
             class="kbd-hint-btn"
             title="Keyboard shortcuts"
             aria-label="Keyboard shortcuts"
-            @click="shortcutsOpen = true"
+            @click="cmdPalette.shortcutsOpen.value = true"
           >
             <kbd>?</kbd>
           </button>
@@ -1224,10 +703,11 @@ function onGlobalKeydown(e: KeyboardEvent) {
         <button @click="exportSpin" class="btn btn-small" title="Capture spin as WebM">WebM</button>
         <button @click="exportPDF" class="btn btn-small" title="Export report (new idea)">PDF</button>
         <button @click="toggleTheme" class="btn btn-small" title="Toggle theme (new idea)">Theme</button>
+        <input type="color" :value="themeColor" @input="e => updateThemeColor((e.target as HTMLInputElement).value)" title="Theme color picker" style="width:24px;height:24px;padding:0;border:none;vertical-align:middle;" />
         <button @click="suggestAIWeights" class="btn btn-small" title="AI weights (new idea)">AI</button>
         <button @click="equalizeWeights" class="btn btn-small" title="Equalize all weights to 1x">=1x</button>
         <button @click="voiceSpin" class="btn btn-small" title="Voice spin (new idea)">🎤 Spin</button>
-        <button @click="preventRepeat = !preventRepeat" class="btn btn-small" :title="preventRepeat ? 'Prevent repeat ON' : 'Prevent repeat OFF'" :aria-pressed="preventRepeat">↻</button>
+        <button @click="roster.togglePreventRepeat()" class="btn btn-small" :title="roster.preventRepeat ? 'Prevent immediate repeat: ON' : 'Prevent immediate repeat: OFF'" :aria-pressed="roster.preventRepeat">no repeat</button>
         <button
           @click="toggleSound"
           class="btn btn-small dock-mute"
@@ -1262,7 +742,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
         <button @click="showTemplateGallery = true" class="btn btn-small" title="Templates (new idea)">Templates</button>
         <button @click="toggleEditor" class="btn btn-small" :title="isEditor ? 'Disable editor tools' : 'Enable advanced editor (weights, history)'" :aria-pressed="isEditor">{{ isEditor ? 'Editor✓' : 'Editor' }}</button>
         <button
-          @click="paletteOpen = true"
+          @click="cmdPalette.paletteOpen.value = true"
           class="btn btn-small"
           title="Open command palette"
         >
@@ -1280,9 +760,13 @@ function onGlobalKeydown(e: KeyboardEvent) {
           <div class="panel">
             <NameList
               ref="nameListRef"
-              :active="activeParticipants"
-              :removed="removedParticipants"
+              :active="roster.activeParticipants"
+              :removed="roster.removedParticipants"
               :ticking-id="tickingId"
+              :comments="comments"
+              :last-picked-id="roster.lastPickedId"
+              :prevent-repeat="roster.preventRepeat"
+              :prepared-segments="roster.preparedSegments"
               @add="addName"
               @add-batch="addNames"
               @remove="handleRemove"
@@ -1292,29 +776,38 @@ function onGlobalKeydown(e: KeyboardEvent) {
             />
           </div>
 
-          <!-- Inspector (editor mode v1) - reuses existing focused/peek selection.
-               Gate behind localStorage 'wheel-editor' === '1' for now (see design iter 2/4). -->
+          <!-- Inspector -->
+          <div class="panel-toggle" @click="ui.togglePanel('inspector')">
+            Inspector {{ panelCollapsed.inspector ? '>' : 'v' }} (editor)
+          </div>
           <InspectorPanel
-            v-if="isEditor"
+            v-if="isEditor && !panelCollapsed.inspector"
             :selected="inspectorSelected"
+            :comments="inspectorSelected ? comments[inspectorSelected.id] : undefined"
             @update-weight="handleUpdateWeight"
             @preview-weight="handlePreviewWeight"
             @update-visual="handleUpdateVisual"
             @add-comment="addComment"
           />
 
-          <!-- HistoryTimeline for top5 -->
+          <!-- HistoryTimeline -->
+          <div class="panel-toggle" @click="ui.togglePanel('history')">
+            History {{ panelCollapsed.history ? '>' : 'v' }}
+          </div>
           <HistoryTimeline
-            v-if="isEditor && history"
+            v-if="isEditor && history && !panelCollapsed.history"
             :actions="history.actions.value || []"
             :session-id="session?.id || ''"
             @restore=" (_id) => { if (_id && history.restoreTo) history.restoreTo(_id) } "
-            @preview=" (id) => { if (id) setPreviewOverrideFromHistory(id); else clearPreviewOverrides() } "
+            @preview=" (id) => { if (id) previewFromHistory(id); else roster.clearPreviews() } "
           />
 
-          <!-- Analytics panel (new idea) -->
+          <!-- Analytics -->
+          <div class="panel-toggle" @click="ui.togglePanel('analytics')">
+            Analytics {{ panelCollapsed.analytics ? '>' : 'v' }}
+          </div>
           <AnalyticsPanel
-            v-if="isEditor"
+            v-if="isEditor && !panelCollapsed.analytics"
             :active="activeParticipants"
             :removed="removedParticipants"
           />
@@ -1334,33 +827,33 @@ function onGlobalKeydown(e: KeyboardEvent) {
 
   <Teleport to="body">
     <SpinResultModal
-      v-if="winnerData"
-      :name="winnerData.name"
-      :remaining="winnerData.remaining"
-      :color="identityColor(winnerData.name)"
+      v-if="spin.winnerData.value"
+      :name="spin.winnerData.value.name"
+      :remaining="spin.winnerData.value.remaining"
+      :color="identityColor(spin.winnerData.value.name)"
       @close="dismissWinner"
     />
   </Teleport>
 
   <Teleport to="body">
     <RecapReel
-      v-if="recapOpen"
+      v-if="spin.recapOpen.value"
       :title="session?.title ?? ''"
       :picked="removedParticipants"
       :survivor="activeParticipants[0] ?? null"
-      @close="recapOpen = false"
+      @close="spin.recapOpen.value = false"
       @copy="copyRecap"
       @copy-image="copyRecapImage"
     />
   </Teleport>
 
   <CommandPalette
-    :open="paletteOpen"
+    :open="cmdPalette.paletteOpen.value"
     :commands="paletteCommands"
-    @close="paletteOpen = false"
+    @close="cmdPalette.paletteOpen.value = false"
   />
 
-  <ShortcutsSheet :open="shortcutsOpen" @close="shortcutsOpen = false" />
+  <ShortcutsSheet :open="cmdPalette.shortcutsOpen.value" @close="cmdPalette.shortcutsOpen.value = false" />
 
   <Teleport to="body">
     <ToastStack />
@@ -1554,6 +1047,20 @@ function onGlobalKeydown(e: KeyboardEvent) {
   border-radius: 8px;
   margin-bottom: 16px;
   text-align: center;
+}
+
+.panel-toggle {
+  font-size: 11px;
+  opacity: 0.7;
+  cursor: pointer;
+  padding: 4px 8px;
+  background: rgba(255,255,255,0.05);
+  border-radius: 4px;
+  margin-bottom: 4px;
+  user-select: none;
+}
+.panel-toggle:hover {
+  opacity: 1;
 }
 
 .create-screen {

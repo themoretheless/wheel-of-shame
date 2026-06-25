@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, computed, watch, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import type { Participant } from '../types'
 import { identityColor } from '../utils/identity'
 import { parsePastedNames } from '../utils/roster'
+import { computeAngles } from '../utils/wheel'
 
 // First visible character, upper-cased, for the round identity token.
 function initialOf(name: string): string {
@@ -28,70 +29,37 @@ const props = defineProps<{
   // Id of the participant whose wheel segment is under the pointer mid-spin; the
   // matching row gets a transient '.ticking' flash so the roster reads the spin.
   tickingId?: string | null
+  comments?: Record<string, string[]>
+  lastPickedId?: string | null
+  preventRepeat?: boolean
+  // From roster/engine (perf): precomputed with angles to avoid duplicate work
+  preparedSegments?: Array<{ id: string; angle: number; weight: number }>
 }>()
 
-// Each active name has equal odds of being picked next; this drives the tinted
-// odds bar behind every active row, recomputing as names are added or ejected.
-const oddsPct = computed(() =>
-  props.active.length > 0 ? 100 / props.active.length : 0,
-)
+// Per-participant odds using shared wheel util or prepared data (from roster/worker).
+const oddsById = computed(() => {
+  const map: Record<string, number> = {}
+  if (!props.active.length) return map
 
-// Survivor-odds roll-up: the per-row "n%" label is shown from displayOdds, a
-// rAF-tweened mirror of oddsPct, so adding or ejecting a name rolls the number
-// up/down to its new value in lockstep with the --odds-width bar's 0.3s ease
-// rather than snapping. Every active row shares the same equal split, so one
-// tweened number drives them all. Reduced motion lands on the value at once.
-const displayOdds = ref(oddsPct.value)
-let oddsRaf = 0
+  let angles: number[]
+  if (props.preparedSegments && props.preparedSegments.length === props.active.length) {
+    // Use precomputed from store/worker (avoids duplicate computeAngles)
+    angles = props.preparedSegments.map(s => s.angle)
+  } else {
+    angles = computeAngles(props.active)
+  }
 
-function prefersReducedMotion(): boolean {
-  return (
-    typeof window !== 'undefined' &&
-    window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
-  )
+  const total = angles.reduce((a, b) => a + b, 0) || (Math.PI * 2)
+  props.active.forEach((p, i) => {
+    map[p.id] = ((angles[i] || 0) / total) * 100
+  })
+  return map
+})
+function getOdds(p: Participant) {
+  return oddsById.value[p.id] ?? (100 / props.active.length)
 }
 
-function tweenOdds(target: number) {
-  if (oddsRaf) cancelAnimationFrame(oddsRaf)
-  if (prefersReducedMotion()) {
-    displayOdds.value = target
-    return
-  }
-  const from = displayOdds.value
-  const delta = target - from
-  if (Math.abs(delta) < 0.05) {
-    displayOdds.value = target
-    return
-  }
-  // Match the bar's cubic-bezier(0.4, 0, 0.2, 1) / 0.3s feel with a cubic ease.
-  const duration = 300
-  const start = performance.now()
-  const step = (now: number) => {
-    const t = Math.min(1, (now - start) / duration)
-    const eased = 1 - Math.pow(1 - t, 3)
-    displayOdds.value = from + delta * eased
-    if (t < 1) {
-      oddsRaf = requestAnimationFrame(step)
-    } else {
-      displayOdds.value = target
-      oddsRaf = 0
-    }
-  }
-  oddsRaf = requestAnimationFrame(step)
-}
-
-watch(oddsPct, (next) => tweenOdds(next))
-
-onBeforeUnmount(() => {
-  if (oddsRaf) cancelAnimationFrame(oddsRaf)
-})
-
-// Rounded label for the odds readout; sub-1% rosters still show "1%" rather
-// than "0%" so a huge roster never reads as no chance at all.
-const oddsLabel = computed(() => {
-  const v = displayOdds.value
-  return v > 0 && v < 1 ? '1%' : `${Math.round(v)}%`
-})
+// Note: individual odds now from getOdds(p) using wheel util (weight aware).
 
 // Last one standing: once at least one name has been picked and a single active
 // row remains, that row is crowned the survivor (a gold-trimmed counterpart to
@@ -118,6 +86,48 @@ const filteredActive = computed(() => {
   if (!searchTerm.value) return props.active
   const term = searchTerm.value.toLowerCase()
   return props.active.filter(p => p.name.toLowerCase().includes(term))
+})
+
+// Simple virtualization for large N (perf fix): fixed row height estimate,
+// window the list inside a scroll viewport. TransitionGroup still used on the
+// window slice (eject anims for off-window rows are skipped, acceptable trade).
+const ROW_H = 34
+const OVERSCAN = 4
+const scrollTop = ref(0)
+const viewportH = ref(320)
+const listContainer = ref<HTMLDivElement | null>(null)
+
+const virtualSlice = computed(() => {
+  const list = filteredActive.value
+  if (list.length <= 12) return { start: 0, end: list.length, list, padTop: 0, padBot: 0 }
+  const start = Math.max(0, Math.floor(scrollTop.value / ROW_H) - OVERSCAN)
+  const visibleCount = Math.ceil(viewportH.value / ROW_H) + OVERSCAN * 2
+  const end = Math.min(list.length, start + visibleCount)
+  return {
+    start,
+    end,
+    list: list.slice(start, end),
+    padTop: start * ROW_H,
+    padBot: (list.length - end) * ROW_H,
+  }
+})
+
+function onListScroll(e: Event) {
+  scrollTop.value = (e.target as HTMLDivElement).scrollTop
+}
+
+function updateViewport() {
+  if (listContainer.value) {
+    viewportH.value = listContainer.value.clientHeight || 320
+  }
+}
+
+onMounted(() => {
+  updateViewport()
+  window.addEventListener('resize', updateViewport)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', updateViewport)
 })
 
 // Template ref on the name field so App.vue can route a global "/" or "n"
@@ -252,7 +262,7 @@ function addName() {
     </div>
 
     <div class="participants">
-      <h3>Active ({{ active.length }})</h3>
+      <h3>Active ({{ active.length }}) <span v-if="comments && Object.keys(comments).length" style="font-size:10px;opacity:.6">💬 {{ Object.keys(comments).length }}</span></h3>
       <!-- Roster filter: dims non-matching rows without removing them, so the
            odds bars keep splitting across every active name. -->
       <div v-if="active.length > 0" class="filter-group">
@@ -275,36 +285,45 @@ function addName() {
       <!-- Physical eject: when a name leaves the active list (picked by a spin
            or removed by hand) the row slides out and blurs away while the rows
            below slide up to fill the gap, instead of vanishing instantly. -->
-      <TransitionGroup v-if="active.length > 0" tag="ul" name="eject">
-        <li
-          v-for="(p, index) in filteredActive"
-          :key="p.id"
-          class="participant-item"
-          :class="{
-            pending: p.pending,
-            error: p.error,
-            ticking: p.id === tickingId,
-            dimmed: !matchesFilter(p),
-            survivor: survivorReached,
-          }"
-          :style="{
-            '--odds-width': oddsPct + '%',
-            '--odds-color': identityColor(p.name),
-            '--tick-color': identityColor(p.name),
-          }"
-          draggable="true"
-          @dragstart="onDragStart(index, $event)"
-          @dragover.prevent
-          @drop="onDrop(index, $event)"
-          @dragenter.prevent
-          @mouseenter="emit('hover-name', p.id)"
-          @mouseleave="emit('hover-name', null)"
-        >
+      <div
+        v-if="active.length > 0"
+        ref="listContainer"
+        class="roster-scroll"
+        @scroll="onListScroll"
+      >
+        <div class="virt-pad" :style="{ height: virtualSlice.padTop + 'px' }"></div>
+        <TransitionGroup tag="ul" name="eject" class="roster-virtual">
+          <li
+            v-for="(p, i) in virtualSlice.list"
+            :key="p.id"
+            class="participant-item"
+            :class="{
+              pending: p.pending,
+              error: p.error,
+              ticking: p.id === tickingId,
+              dimmed: !matchesFilter(p),
+              survivor: survivorReached,
+            }"
+            :style="{
+              '--odds-width': getOdds(p) + '%',
+              '--odds-color': identityColor(p.name),
+              '--tick-color': identityColor(p.name),
+            }"
+            draggable="true"
+            @dragstart="onDragStart(virtualSlice.start + i, $event)"
+            @dragover.prevent
+            @drop="onDrop(virtualSlice.start + i, $event)"
+            @dragenter.prevent
+            @mouseenter="emit('hover-name', p.id)"
+            @mouseleave="emit('hover-name', null)"
+          >
           <span class="name-cell">
             <span class="identity-token" :style="{ background: identityColor(p.name) }">{{
               initialOf(p.name)
             }}</span>
             <span class="name-text">{{ p.name }}</span>
+            <span v-if="comments && comments[p.id] && comments[p.id].length" class="comment-badge" :title="comments[p.id].slice(-1)[0]">💬{{ comments[p.id].length }}</span>
+            <span v-if="lastPickedId === p.id && preventRepeat" class="last-badge" title="Last picked (prevent repeat active)">last</span>
             <span v-if="survivorReached" class="survivor-chip" title="Last one standing">
               Survivor
             </span>
@@ -315,8 +334,8 @@ function addName() {
                  pending/error rows, which carry no odds (their bar is hidden
                  too). -->
             <span v-if="!p.pending && !p.error" class="odds-pct" aria-hidden="true">{{
-              oddsLabel
-            }}</span>
+              getOdds(p).toFixed(0)
+            }}%</span>
             <button
               v-if="!p.pending"
               @click="emit('remove', p.id)"
@@ -327,7 +346,9 @@ function addName() {
             </button>
           </span>
         </li>
-      </TransitionGroup>
+        </TransitionGroup>
+        <div class="virt-pad" :style="{ height: virtualSlice.padBot + 'px' }"></div>
+      </div>
       <p v-if="active.length > 0 && filterMatchCount === 0" class="filter-empty">
         No active names match “{{ filterQuery.trim() }}”.
       </p>
@@ -358,6 +379,8 @@ function addName() {
               initialOf(p.name)
             }}</span>
             <span class="name-text">{{ p.name }}</span>
+            <span v-if="comments && comments[p.id] && comments[p.id].length" class="comment-badge" :title="comments[p.id].slice(-1)[0]">💬{{ comments[p.id].length }}</span>
+            <span v-if="lastPickedId === p.id && preventRepeat" class="last-badge" title="Last picked (prevent repeat active)">last</span>
           </span>
         </li>
       </ol>
@@ -611,6 +634,22 @@ ol {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.comment-badge {
+  font-size: 10px;
+  background: #333;
+  padding: 0 4px;
+  border-radius: 3px;
+  margin-left: 4px;
+  cursor: default;
+}
+.last-badge {
+  font-size: 9px;
+  background: #e74c3c;
+  color: white;
+  padding: 0 3px;
+  border-radius: 2px;
+  margin-left: 4px;
 }
 
 /* Right cluster: the rolled odds readout next to the remove control, kept above
@@ -907,5 +946,21 @@ ol {
 
 .btn-reset:hover {
   background: rgba(255, 234, 167, 0.25);
+}
+
+/* Virtualization container for roster perf with long lists. */
+.roster-scroll {
+  max-height: 320px;
+  overflow: auto;
+  contain: layout paint;
+}
+.roster-virtual {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.virt-pad {
+  height: 0;
+  pointer-events: none;
 }
 </style>

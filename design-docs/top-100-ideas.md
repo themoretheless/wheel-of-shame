@@ -1,13 +1,36 @@
 # Wheel of Shame — Top 100 Ideas, Suggestions & Problem Solutions (2026-06-18)
 
-**Status (poured on branch pour-all-top-100-ideas):**
-Many ideas implemented or wired in this big "влей всё" pass + previous audit fixes.
-Key poured in this cycle:
-- Perf: 1 (throttle), 2 (pure math + wire), 6 (FPS)
-- UX: 22 (voice fallback), 24 (equalize button + func)
-- Features: 41 (mini comments in inspector)
-- Plus prevent-repeat enhancement, computeAngles reuse.
-See git log. Full 100 remain as roadmap with many already realized from prior iters.
+**Status (постоянно обновляется):**
+Многое влито (inspector, history/undo/timeline, weights+equalize+AI, templates, analytics, mini comments+badges+persist, exports SVG/WebM, theming, voice improved, FPS, throttle preview, pure wheel math, debounce, collapsible panels, weighted odds, reduce any, dev console, usePreview/usePreventRepeat/useVoice composables, auto editor, color picker, last-picked visual ring/glow on wheel, etc.).
+Остальные в roadmap (см. ниже "not done" и IMPROVEMENTS.md).
+
+**Топ 20 приоритетных оставшихся задач (из 100 + аудитов):**
+1. Web Worker for heavy spin sim / export (perf)
+2. Virtualized NameList for large N (perf/UI)
+3. Full threaded comments on server + WS + persist (feature)
+4. Use Pinia for state management (arch)
+5. Extract flame to useFlame composable (arch)
+6. Full rich exports (JSON, GIF, CSV, bundle) (feature)
+7. Branching from snapshot (feature)
+8. Eliminate remaining as any (arch)
+9. Full server rules engine (design)
+10. Replay mode with 3D (feature)
+11. Lazy 2D fallback mode (perf)
+12. Auto show editor mode when advanced used (UI)
+13. Central useStorage composable (arch)
+14. Consistent snapshot timing full (arch)
+15. Avoid full rebuild on visual only (perf)
+16. Property-based tests for bias (devex)
+17. Multi-session compare (feature)
+18. Full YDB support (backend)
+19. Rate limiting (backend)
+20. Color picker theming (UI)
+
+Полный 100 ниже.
+
+Полный список 100 идей ниже. Из них **предложенные но не сделанные** (или частично) перечислены в конце разделов и в отдельном списке.
+
+(Статус основан на текущем коде после pours.)
 
 ---
 

@@ -5,6 +5,7 @@ import { identityColor } from '../utils/identity'
 
 const props = defineProps<{
   selected: Participant | null
+  comments?: string[]
 }>()
 
 const emit = defineEmits<{
@@ -86,6 +87,9 @@ function submitComment() {
       <input v-model="commentText" @keyup.enter="submitComment" placeholder="Add comment..." class="comment-input" />
       <button @click="submitComment" class="btn-small">Add</button>
     </div>
+    <div v-if="props.comments && props.comments.length" class="comments-list">
+      <div v-for="(c, i) in props.comments" :key="i" class="comment-item">• {{ c }}</div>
+    </div>
   </div>
 </template>
 
@@ -149,5 +153,15 @@ input[type="range"] {
   background: #222;
   border: 1px solid #444;
   color: #ddd;
+}
+.comments-list {
+  margin-top: 6px;
+  font-size: 9px;
+  max-height: 60px;
+  overflow: auto;
+  opacity: 0.8;
+}
+.comment-item {
+  padding: 1px 0;
 }
 </style>

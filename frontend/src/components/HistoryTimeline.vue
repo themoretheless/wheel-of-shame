@@ -47,7 +47,7 @@ function onScrubEnd() {
 }
 
 function formatAction(action: Action) {
-  const kind = action.kind as any
+  const kind = action.kind as { type?: string; payload?: any }
   const type = kind.type || 'unknown'
   const payload = kind.payload || {}
   let label = type

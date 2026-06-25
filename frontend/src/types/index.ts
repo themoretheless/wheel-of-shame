@@ -42,6 +42,7 @@ export type ActionKind =
   | { type: 'UpdateVisual'; payload: { id: string; visual: SegmentVisual } }
   | { type: 'Reorder'; payload: { from: number; to: number } }
   | { type: 'SnapshotRestored'; payload: { snapshot_id: string } }
+  | { type: 'Comment'; payload: { participant_id: string; text: string } }
 
 export interface Snapshot {
   id: string

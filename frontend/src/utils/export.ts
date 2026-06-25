@@ -4,7 +4,7 @@ import { computeAngles } from './wheel'
 export async function exportWheelSVG(participants: Participant[], title: string): Promise<string> {
   // Simple SVG generator using shared pure math
   const active = participants.filter(p => !p.removed)
-  const angles = computeAngles(active as any)
+  const angles = computeAngles(active)
   let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">`
   svg += `<circle cx="200" cy="200" r="180" fill="#1e1e1e" stroke="#4ECDC4" stroke-width="4"/>`
   let cursor = -Math.PI / 2
@@ -16,7 +16,7 @@ export async function exportWheelSVG(participants: Participant[], title: string)
     const x2 = 200 + 170 * Math.cos(end)
     const y2 = 200 + 170 * Math.sin(end)
     const large = angle > Math.PI ? 1 : 0
-    const color = (p as any).visual?.color_override || '#4ECDC4'
+    const color = p.visual?.color_override || '#4ECDC4'
     svg += `<path d="M200,200 L${x1},${y1} A170,170 0 ${large} 1 ${x2},${y2} Z" fill="${color}" stroke="#fff" stroke-width="1"/>`
     cursor = end
   })
