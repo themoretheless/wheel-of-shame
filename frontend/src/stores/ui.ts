@@ -73,12 +73,11 @@ export const useUiStore = defineStore('ui', () => {
   const showTemplateGallery = ref(false)
 
   const cameraDrifted = ref(false)
-  const recapOpen = ref(false)
-  const recapQueued = ref(false)
 
-  // Spin state (moved from App for centralization)
-  const spinning = ref(false)
-  const winnerId = ref<string | null>(null)
+  // Spin and recap state live in useSpin (the spin flow's single source of
+  // truth). The ui store used to declare spinning/winnerId/recapOpen/recapQueued
+  // too, but nothing ever wrote them, so binding the wheel to the ui-store refs
+  // silently broke local-spin animation; removed to kill the dead-state landmine.
 
   // Live spin/hover state
   const tickingId = ref<string | null>(null)
@@ -137,10 +136,6 @@ export const useUiStore = defineStore('ui', () => {
     shortcutsOpen,
     showTemplateGallery,
     cameraDrifted,
-    recapOpen,
-    recapQueued,
-    spinning,
-    winnerId,
     setCameraDrifted,
 
     // Live interaction
