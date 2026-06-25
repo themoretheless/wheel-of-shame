@@ -61,9 +61,36 @@ export function filterPreventRepeat<T extends { id: string }>(
   return active.filter(p => p.id !== lastPickedId);
 }
 
+/**
+ * Which segment id sits under the fixed top pointer for a given wheel rotation,
+ * assuming uniform slices (the spin tick-cross approximation used by the
+ * renderer). `ids` is in wheel order (segment 0 starts at angle 0). Returns null
+ * for an empty list or an undefined slot.
+ *
+ * This is the pure core of the per-frame tick logic in
+ * ThreeWheelRenderer.playSpin, extracted so the mapping is unit-tested: the id
+ * list there was previously never populated, so `ids[crossed]` was always
+ * undefined and the spin played no ticks at all.
+ */
+export function segmentIdAtRotation(
+  rotation: number,
+  ids: Array<string | undefined>
+): string | null {
+  const n = ids.length;
+  if (n === 0) return null;
+  const twoPi = Math.PI * 2;
+  const slice = twoPi / n;
+  const rotNorm = ((rotation % twoPi) + twoPi) % twoPi;
+  let crossed = Math.floor(rotNorm / slice);
+  if (crossed >= n) crossed = n - 1;
+  if (crossed < 0) crossed = 0;
+  return ids[crossed] ?? null;
+}
+
 export default {
   computeAngles,
   weightedPickIndex,
   simulateSpins,
   filterPreventRepeat,
+  segmentIdAtRotation,
 };

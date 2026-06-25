@@ -13,6 +13,7 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js'
 import opentype from 'opentype.js'
 import type { PreparedSegment } from '../components/WheelCanvas.vue'
 import type { WheelRenderer } from './WheelRenderer'
+import { segmentIdAtRotation } from '../utils/wheel'
 
 const WHEEL_RADIUS = 2.2
 const WHEEL_INNER = 0.6
@@ -565,10 +566,8 @@ export class ThreeWheelRenderer implements WheelRenderer {
         this.wheelGroup.scale.set(s, s, 1)
       }
 
-      // tick on segment cross
-      const rotNorm = ((this.currentRotation % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2)
-      const crossed = Math.floor(rotNorm / slice)
-      const id = this.spinSegmentIds[crossed] || null
+      // tick on segment cross (pure mapping, unit-tested in utils/wheel.test.ts)
+      const id = segmentIdAtRotation(this.currentRotation, this.spinSegmentIds)
       if (id && id !== this.lastTickSegment) {
         this.lastTickSegment = id
         this.onTick(id)
