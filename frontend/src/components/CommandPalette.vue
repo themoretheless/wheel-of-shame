@@ -446,6 +446,13 @@ function onKeydown(e: KeyboardEvent) {
   color: #636e72;
 }
 
+/* The search field is auto-focused and obviously the active surface (its bottom
+   border + the modal framing already signal it), so suppress the global
+   keyboard ring here to avoid a heavy outline around the whole input. */
+.palette-input:focus-visible {
+  outline: none;
+}
+
 /* Inline-entry header: a breadcrumb chip for the originating command sits to the
    left of the value field, sharing the input's bottom border. */
 .palette-inline-bar {

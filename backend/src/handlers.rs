@@ -1,5 +1,5 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
@@ -242,4 +242,123 @@ async fn handle_ws(mut socket: WebSocket, mut sub: crate::ws::Subscription) {
             }
         }
     }
+}
+
+// Editor feature handlers (additive, from design iters 1-4)
+
+#[derive(Debug, serde::Deserialize)]
+pub struct UpdatePropsRequest {
+    #[serde(default)]
+    pub weight: Option<f32>,
+    #[serde(default)]
+    pub visual: Option<crate::models::SegmentVisual>,
+}
+
+pub async fn update_participant_props(
+    State(state): State<AppState>,
+    Path((session_id, pid)): Path<(String, String)>,
+    Json(req): Json<UpdatePropsRequest>,
+) -> Result<Json<Participant>, AppError> {
+    ensure_session_exists(&state, &session_id).await?;
+    // Server clamp + validation (0.1-10) per design
+    let clamped_weight = req.weight.map(|w| w.clamp(0.1, 10.0));
+    let participant = state
+        .store
+        .update_participant_props(&session_id, &pid, clamped_weight, req.visual.clone())
+        .await?;
+
+    // Log action(s) - support weight-only, visual-only or both (additive editor actions)
+    if let Some(w) = clamped_weight {
+        let wa = Action {
+            id: uuid::Uuid::new_v4().to_string(),
+            session_id: session_id.clone(),
+            kind: ActionKind::UpdateWeight { id: pid.clone(), weight: w },
+            timestamp: chrono::Utc::now(),
+            actor: None,
+        };
+        let _ = state.store.append_action(&wa).await;
+        state.hub.broadcast(&session_id, SessionEvent::ActionLogged { action: wa }).await;
+    }
+    if let Some(v) = req.visual.clone() {
+        let va = Action {
+            id: uuid::Uuid::new_v4().to_string(),
+            session_id: session_id.clone(),
+            kind: ActionKind::UpdateVisual { id: pid.clone(), visual: v },
+            timestamp: chrono::Utc::now(),
+            actor: None,
+        };
+        let _ = state.store.append_action(&va).await;
+        state.hub.broadcast(&session_id, SessionEvent::ActionLogged { action: va }).await;
+    }
+
+    state
+        .hub
+        .broadcast(&session_id, SessionEvent::SegmentUpdated { participant: participant.clone() })
+        .await;
+
+    Ok(Json(participant))
+}
+
+pub async fn list_actions(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Vec<Action>>, AppError> {
+    ensure_session_exists(&state, &session_id).await?;
+    let limit: usize = q.get("limit").and_then(|s| s.parse().ok()).unwrap_or(50).clamp(1, 200);
+    let actions = state.store.list_actions(&session_id, limit).await?;
+    Ok(Json(actions))
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct SnapshotQuery {
+    #[serde(default)]
+    pub before: Option<String>,
+}
+
+pub async fn get_snapshot(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Query(q): Query<SnapshotQuery>,
+) -> Result<Json<Option<Snapshot>>, AppError> {
+    ensure_session_exists(&state, &session_id).await?;
+    let snap = state
+        .store
+        .get_snapshot(&session_id, q.before.as_deref())
+        .await?;
+    Ok(Json(snap))
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct RestoreRequest {
+    pub participants: Vec<Participant>,
+}
+
+pub async fn restore_from_snapshot(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(req): Json<RestoreRequest>,
+) -> Result<(StatusCode, Json<Vec<Participant>>), AppError> {
+    ensure_session_exists(&state, &session_id).await?;
+    let participants = state
+        .store
+        .restore_from_snapshot(&session_id, &req.participants)
+        .await?;
+
+    // Log compensating action
+    let action = Action {
+        id: uuid::Uuid::new_v4().to_string(),
+        session_id: session_id.clone(),
+        kind: ActionKind::SnapshotRestored { snapshot_id: uuid::Uuid::new_v4().to_string() },
+        timestamp: chrono::Utc::now(),
+        actor: None,
+    };
+    let _ = state.store.append_action(&action).await;
+
+    state
+        .hub
+        .broadcast(&session_id, SessionEvent::SnapshotRestored { participants: participants.clone() })
+        .await;
+
+    Ok((StatusCode::OK, Json(participants)))
 }

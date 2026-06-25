@@ -11,7 +11,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::error::AppError;
-use crate::models::{Participant, Session, SpinResult};
+use crate::models::{Action, Participant, SegmentVisual, Session, Snapshot, SpinResult};
 use crate::ws::Hub;
 
 mod memory;
@@ -57,6 +57,30 @@ pub trait Store: Send + Sync {
     /// Restore all participants of a session to the active state.
     /// Returns the restored participant list.
     async fn reset_session(&self, session_id: &str) -> Result<Vec<Participant>, AppError>;
+
+    /// Update weight and/or visual for one participant (idempotent, additive).
+    async fn update_participant_props(
+        &self,
+        session_id: &str,
+        participant_id: &str,
+        weight: Option<f32>,
+        visual: Option<SegmentVisual>,
+    ) -> Result<Participant, AppError>;
+
+    async fn append_action(&self, action: &Action) -> Result<(), AppError>;
+    async fn list_actions(&self, session_id: &str, limit: usize) -> Result<Vec<Action>, AppError>;
+
+    async fn create_snapshot(&self, snapshot: &Snapshot) -> Result<(), AppError>;
+    /// Returns the snapshot at or immediately before the given action (or latest if None).
+    async fn get_snapshot(&self, session_id: &str, before_action_id: Option<&str>) -> Result<Option<Snapshot>, AppError>;
+
+    /// Replace the entire participant list for a session (used by snapshot restore for undo).
+    /// Returns the new list. Does not append action (caller does).
+    async fn restore_from_snapshot(
+        &self,
+        session_id: &str,
+        participants: &[Participant],
+    ) -> Result<Vec<Participant>, AppError>;
 }
 
 /// Runtime-selected storage backend shared across the app.

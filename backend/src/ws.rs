@@ -26,6 +26,16 @@ pub enum SessionEvent {
 
     #[serde(rename = "session_reset")]
     SessionReset { participants: Vec<Participant> },
+
+    // Editor features (from design iterations)
+    #[serde(rename = "segment_updated")]
+    SegmentUpdated { participant: Participant },
+
+    #[serde(rename = "action_logged")]
+    ActionLogged { action: crate::models::Action },
+
+    #[serde(rename = "snapshot_restored")]
+    SnapshotRestored { participants: Vec<Participant> },
 }
 
 type Channels = Arc<RwLock<HashMap<String, broadcast::Sender<String>>>>;

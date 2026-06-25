@@ -1,4 +1,4 @@
-import type { Session, SessionData, SpinResult, Participant } from '../types'
+import type { Session, SessionData, SpinResult, Participant, SegmentVisual } from '../types'
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080'
 
@@ -65,5 +65,34 @@ export function spin(sessionId: string): Promise<SpinResult> {
 export function resetSession(sessionId: string): Promise<void> {
   return request(`/api/v1/sessions/${sessionId}/reset`, {
     method: 'POST',
+  })
+}
+
+// New for editor features (weights, history, inspector) - additive
+export function updateParticipantProps(
+  sessionId: string,
+  participantId: string,
+  weight?: number,
+  visual?: SegmentVisual,
+): Promise<Participant> {
+  return request(`/api/v1/sessions/${sessionId}/participants/${participantId}/props`, {
+    method: 'POST',
+    body: JSON.stringify({ weight, visual }),
+  })
+}
+
+export function listActions(sessionId: string, limit = 50): Promise<any[]> {
+  return request(`/api/v1/sessions/${sessionId}/actions?limit=${limit}`)
+}
+
+export function getSnapshot(sessionId: string, beforeActionId?: string): Promise<any> {
+  const q = beforeActionId ? `?before=${beforeActionId}` : ''
+  return request(`/api/v1/sessions/${sessionId}/snapshot${q}`)
+}
+
+export function restoreFromSnapshot(sessionId: string, participants: Participant[]): Promise<Participant[]> {
+  return request(`/api/v1/sessions/${sessionId}/restore`, {
+    method: 'POST',
+    body: JSON.stringify({ participants }),
   })
 }

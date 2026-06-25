@@ -1,17 +1,25 @@
-import { ref, computed } from 'vue'
-import type { Session, Participant, SpinResult } from '../types'
+import { ref } from 'vue'
+import type { Session, SpinResult } from '../types'
 import * as api from '../api/client'
 import { useWebSocket } from './useWebSocket'
 import { useToasts } from './useToasts'
 import { identityColor } from '../utils/identity'
+import { useHistory } from './useHistory'
+import { useRosterStore } from '../stores/roster'
 
 const { push: pushToast, update: updateToast, dismiss: dismissToast } = useToasts()
 
 const session = ref<Session | null>(null)
-const participants = ref<Participant[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
 const lastSpinResult = ref<SpinResult | null>(null)
+
+// History is now pure event log (roster is owner)
+const history = useHistory('')
+function setHistorySession(id: string) {
+  // Minimal patch for composable internal (no full refactor); typed access
+  ;(history as unknown as { _sessionId?: string })._sessionId = id
+}
 
 // --- Pinned recents (frecency-lite) ---
 //
@@ -142,7 +150,7 @@ function scheduleReconnect() {
   )
   const delay = backoff + Math.random() * RECONNECT_JITTER_MS
   reconnectAttempt++
-  console.log(
+  if (import.meta.env.DEV) console.log(
     `[ws] connection lost, reconnect attempt ${reconnectAttempt} in ${Math.round(delay)}ms`,
   )
   reconnectTimer = setTimeout(() => {
@@ -159,21 +167,23 @@ async function attemptReconnect(gen: number) {
     const data = await api.getSession(id)
     if (gen !== reconnectGen) return
     session.value = data.session
-    participants.value = data.participants
+    const r = useRosterStore()
+    r.setSessionId(data.session.id)
+    r.setParticipants(data.participants)
     error.value = null
     // Don't reset the backoff here: the REST re-fetch succeeding doesn't mean
     // the WebSocket will. Reset only once the socket actually opens (onOpen
     // below), so a server that serves HTTP but drops the WS handshake still
     // escalates the delay instead of looping at the base interval.
-    console.log('[ws] session state re-synced, reopening websocket')
+    if (import.meta.env.DEV) console.log('[ws] session state re-synced, reopening websocket')
     ws.connect(id)
   } catch (e: any) {
     if (gen !== reconnectGen) return
     if (e?.status === 404) {
-      console.log('[ws] session no longer exists on server, giving up')
+      if (import.meta.env.DEV) console.log('[ws] session no longer exists on server, giving up')
       cancelReconnect()
       session.value = null
-      participants.value = []
+      useRosterStore().setParticipants([])
       error.value =
         'Session no longer exists (the server may have restarted). Please create a new session.'
       return
@@ -199,12 +209,10 @@ ws.onUnexpectedClose(() => {
 ws.onMessage((event: any) => {
   switch (event.type) {
     case 'participant_added': {
-      const exists = participants.value.some((p) => p.id === event.participant.id)
-      if (!exists) {
-        participants.value.push(event.participant)
-        // A name we didn't have yet arrived over the wire: another client added
-        // it. (Our own adds are reconciled by id and already present, so they
-        // don't toast here.)
+      const roster = useRosterStore()
+      const current = roster.participants || []
+      if (!current.some((p: any) => p.id === event.participant.id)) {
+        roster.setParticipants([...current, event.participant])
         pushToast(
           `${event.participant.name} joined`,
           'info',
@@ -214,23 +222,19 @@ ws.onMessage((event: any) => {
       break
     }
     case 'participants_added': {
-      let added = 0
-      for (const p of event.participants) {
-        const exists = participants.value.some((ep) => ep.id === p.id)
-        if (!exists) {
-          participants.value.push(p)
-          added++
-        }
-      }
-      if (added > 0) {
-        pushToast(`${added} ${added === 1 ? 'name' : 'names'} added`, 'info')
+      const roster = useRosterStore()
+      const current = roster.participants || []
+      const toAdd = event.participants.filter((p: any) => !current.some((ep: any) => ep.id === p.id))
+      if (toAdd.length > 0) {
+        roster.setParticipants([...current, ...toAdd])
+        pushToast(`${toAdd.length} name(s) added`, 'info')
       }
       break
     }
     case 'participant_deleted': {
-      participants.value = participants.value.filter(
-        (p) => p.id !== event.participant_id,
-      )
+      const roster = useRosterStore()
+      const current = (roster.participants || []).filter((p: any) => p.id !== event.participant_id)
+      roster.setParticipants(current)
       break
     }
     case 'spin_result': {
@@ -258,24 +262,39 @@ ws.onMessage((event: any) => {
       break
     }
     case 'session_reset': {
-      participants.value = event.participants
+      useRosterStore().setParticipants(event.participants || [])
       lastSpinResult.value = null
       pushToast('Session reset', 'info')
+      break
+    }
+    case 'segment_updated': {
+      const roster = useRosterStore()
+      const current = roster.participants || []
+      const idx = current.findIndex((p: any) => p.id === event.participant.id)
+      if (idx !== -1) {
+        current[idx] = { ...current[idx], ...event.participant }
+        roster.setParticipants(current)
+      }
+      break
+    }
+    case 'action_logged': {
+      // optional: could push to a local history if exposed
+      break
+    }
+    case 'snapshot_restored': {
+      useRosterStore().setParticipants(event.participants || [])
+      lastSpinResult.value = null
+      pushToast('State restored from history', 'info')
       break
     }
   }
 })
 
 export function useSession() {
-  const activeParticipants = computed(() =>
-    participants.value.filter((p) => !p.removed),
-  )
+  const roster = useRosterStore()
 
-  const removedParticipants = computed(() =>
-    participants.value
-      .filter((p) => p.removed)
-      .sort((a, b) => (a.spin_order ?? 0) - (b.spin_order ?? 0)),
-  )
+  // useSession no longer owns the roster list (fundamental change point 1).
+  // Roster data lives exclusively in rosterStore.
 
   async function create(title: string) {
     loading.value = true
@@ -283,7 +302,14 @@ export function useSession() {
     try {
       cancelReconnect()
       session.value = await api.createSession(title)
-      participants.value = []
+      roster.setSessionId(session.value.id)
+      roster.setParticipants([])
+      setHistorySession(session.value.id)
+      history.loadActions?.().then(() => {
+        if (history.actions?.value?.length) {
+          roster.replayEvents(history.actions.value)
+        }
+      })
       rememberSession(session.value)
       window.location.hash = `#/${session.value.id}`
       ws.connect(session.value.id)
@@ -301,7 +327,14 @@ export function useSession() {
       cancelReconnect()
       const data = await api.getSession(id)
       session.value = data.session
-      participants.value = data.participants
+      roster.setSessionId(data.session.id)
+      roster.setParticipants(data.participants)
+      setHistorySession(data.session.id)
+      history.loadActions?.().then(() => {
+        if (history.actions?.value?.length) {
+          roster.replayEvents(history.actions.value)
+        }
+      })
       rememberSession(data.session)
       ws.connect(id)
     } catch (e: any) {
@@ -315,83 +348,27 @@ export function useSession() {
   async function addName(name: string) {
     if (!session.value) return
     error.value = null
-    // Optimistic add (Linear-style): show a pending chip immediately, then
-    // reconcile its id once the server confirms. A unique temp id keeps the
-    // list/wheel :key stable and lets us find the row again on resolve.
-    const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2)}`
-    const temp: Participant = {
-      id: tempId,
-      session_id: session.value.id,
-      name,
-      removed: false,
-      pending: true,
-    }
-    participants.value.push(temp)
-    try {
-      const p = await api.addParticipant(session.value.id, name)
-      const tempIdx = participants.value.findIndex((ep) => ep.id === tempId)
-      // The WS broadcast may have already delivered the real participant.
-      const exists = participants.value.some((ep) => ep.id === p.id)
-      if (tempIdx !== -1) {
-        if (exists) {
-          // Real one arrived via WS; drop the temp placeholder.
-          participants.value.splice(tempIdx, 1)
-        } else {
-          // Reconcile in place so the row settles without a remount.
-          participants.value[tempIdx] = p
-        }
-      } else if (!exists) {
-        participants.value.push(p)
-      }
-    } catch (e: any) {
-      error.value = e.message
-      // Flag the temp row so the UI can shake it, then remove it shortly after.
-      const tempIdx = participants.value.findIndex((ep) => ep.id === tempId)
-      if (tempIdx !== -1) {
-        participants.value[tempIdx] = { ...temp, pending: false, error: true }
-        setTimeout(() => {
-          participants.value = participants.value.filter((ep) => ep.id !== tempId)
-        }, 600)
-      }
-    }
+    await roster.addName(name).catch((e: any) => { error.value = e.message })
   }
 
   async function addNames(names: string[]) {
     if (!session.value) return
     error.value = null
-    try {
-      const newParticipants = await api.addParticipantsBatch(
-        session.value.id,
-        names,
-      )
-      for (const p of newParticipants) {
-        const exists = participants.value.some((ep) => ep.id === p.id)
-        if (!exists) {
-          participants.value.push(p)
-        }
-      }
-    } catch (e: any) {
-      error.value = e.message
-    }
+    await roster.addNames(names).catch((e: any) => { error.value = e.message })
   }
 
   async function removeName(participantId: string) {
     if (!session.value) return
     error.value = null
-    try {
-      await api.deleteParticipant(session.value.id, participantId)
-      participants.value = participants.value.filter(
-        (p) => p.id !== participantId,
-      )
-    } catch (e: any) {
-      error.value = e.message
-    }
+    await roster.removeName(participantId).catch((e: any) => { error.value = e.message })
   }
 
   async function doSpin(): Promise<SpinResult | null> {
     if (!session.value) return null
     error.value = null
     suppressWsSpin = true
+
+    // Note: rules now primarily handled in rosterStore + engine
     try {
       const result = await api.spin(session.value.id)
       lastSpinResult.value = result
@@ -403,39 +380,25 @@ export function useSession() {
   }
 
   function applySpinResult(result: SpinResult) {
-    const idx = participants.value.findIndex((p) => p.id === result.picked.id)
-    if (idx !== -1) {
-      participants.value[idx] = result.picked
-    }
+    roster.applySpinResult(result)
   }
 
   async function reset() {
     if (!session.value) return
     error.value = null
-    try {
-      await api.resetSession(session.value.id)
-      participants.value.forEach((p) => {
-        p.removed = false
-        p.removed_at = undefined
-        p.spin_order = undefined
-      })
-      lastSpinResult.value = null
-    } catch (e: any) {
-      error.value = e.message
-    }
+    await roster.resetRoster().catch((e: any) => { error.value = e.message })
+    lastSpinResult.value = null
   }
 
   return {
     session,
-    participants,
-    activeParticipants,
-    removedParticipants,
     loading,
     error,
     lastSpinResult,
     remoteSpinResult,
     recentSessions,
     wsConnected: ws.connected,
+    history,
     create,
     load,
     addName,
@@ -444,5 +407,6 @@ export function useSession() {
     doSpin,
     applySpinResult,
     reset,
+    setHistorySession,
   }
 }

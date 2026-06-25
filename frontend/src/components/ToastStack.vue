@@ -36,6 +36,11 @@ function runAction(t: Toast) {
         >
           {{ t.action.label }}
         </button>
+        <span
+          v-if="t.action && !t.sticky"
+          class="toast-timer"
+          aria-hidden="true"
+        ></span>
       </div>
     </TransitionGroup>
   </div>
@@ -55,6 +60,8 @@ function runAction(t: Toast) {
 }
 
 .toast {
+  position: relative;
+  overflow: hidden;
   pointer-events: auto;
   display: flex;
   align-items: center;
@@ -67,6 +74,42 @@ function runAction(t: Toast) {
   border-left: 3px solid var(--toast-accent, #4ECDC4);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
   cursor: pointer;
+}
+
+/* Draining countdown bar along the toast's bottom edge: makes the otherwise
+   invisible undo window legible (Gmail-style). The 3200ms mirrors useToasts
+   DEFAULT_TTL_MS; hovering the toast pauses it so you can read and aim before
+   the window closes. Only rendered for non-sticky toasts that carry an action. */
+.toast-timer {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 100%;
+  height: 2px;
+  transform-origin: left center;
+  background: var(--toast-accent, #4ECDC4);
+  opacity: 0.65;
+  animation: toast-timer-drain 3200ms linear forwards;
+}
+
+.toast:hover .toast-timer {
+  animation-play-state: paused;
+}
+
+@keyframes toast-timer-drain {
+  from {
+    transform: scaleX(1);
+  }
+  to {
+    transform: scaleX(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* A static bar that never drains would misrepresent the window, so hide it. */
+  .toast-timer {
+    display: none;
+  }
 }
 
 .toast-dot {
