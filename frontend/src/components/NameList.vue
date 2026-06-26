@@ -123,6 +123,7 @@ function weightOf(participant: Participant): number {
 const totalWeight = computed(() =>
   props.active.reduce((sum, participant) => sum + weightOf(participant), 0),
 )
+const pinnedCount = computed(() => props.active.filter((participant) => participant.pinned).length)
 
 const nextOdds = computed(() => {
   if (props.active.length === 0) return '0%'
@@ -145,13 +146,18 @@ function participantMatches(p: Participant): boolean {
 
 function sortParticipants(list: Participant[], picked: boolean): Participant[] {
   const sorted = [...list]
+  const pinnedSort = (a: Participant, b: Participant) => Number(b.pinned) - Number(a.pinned)
   if (sortMode.value === 'name') {
-    return sorted.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
+    return sorted.sort(
+      (a, b) =>
+        (picked ? 0 : pinnedSort(a, b)) ||
+        a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }),
+    )
   }
   if (picked) {
     return sorted.sort((a, b) => (a.spin_order ?? 0) - (b.spin_order ?? 0))
   }
-  return sorted
+  return sorted.sort(pinnedSort)
 }
 
 const activeFiltered = computed(() =>
@@ -319,6 +325,7 @@ onBeforeUnmount(() => {
       <span><strong>{{ totalCount }}</strong>Total</span>
       <span><strong>{{ active.length }}</strong>Active</span>
       <span><strong>{{ removed.length }}</strong>Picked</span>
+      <span><strong>{{ totalWeight }}</strong>Tickets</span>
     </div>
 
     <div class="view-tabs" role="tablist" aria-label="Roster view">
@@ -351,7 +358,7 @@ onBeforeUnmount(() => {
       </button>
     </div>
 
-    <div class="rail-controls">
+    <div class="control-grid" aria-label="Roster controls">
       <label class="sort-control">
         <span>Sort</span>
         <select v-model="sortMode">
@@ -359,14 +366,6 @@ onBeforeUnmount(() => {
           <option value="name">Name</option>
         </select>
       </label>
-      <label class="compact-toggle">
-        <input v-model="compactRows" type="checkbox" />
-        <span class="toggle-box" aria-hidden="true"></span>
-        <span>Compact</span>
-      </label>
-    </div>
-
-    <div class="lab-controls">
       <label class="sort-control">
         <span>Theme</span>
         <select
@@ -379,6 +378,11 @@ onBeforeUnmount(() => {
         </select>
       </label>
       <label class="compact-toggle">
+        <input v-model="compactRows" type="checkbox" />
+        <span class="toggle-box" aria-hidden="true"></span>
+        <span>Compact</span>
+      </label>
+      <label class="compact-toggle">
         <input
           :checked="spectatorMode"
           type="checkbox"
@@ -387,10 +391,7 @@ onBeforeUnmount(() => {
         <span class="toggle-box" aria-hidden="true"></span>
         <span>Spectator</span>
       </label>
-    </div>
-
-    <div class="sound-row">
-      <label class="compact-toggle">
+      <label class="compact-toggle sound-toggle">
         <input
           :checked="soundEnabled"
           type="checkbox"
@@ -521,7 +522,7 @@ onBeforeUnmount(() => {
           v-for="p in activeFiltered"
           :key="p.id"
           class="participant-item"
-          :class="{ pending: p.pending, error: p.error, pinned: p.pinned }"
+          :class="{ pending: p.pending, error: p.error, pinned: p.pinned, weighted: weightOf(p) > 1 }"
         >
           <span class="name-cell">
             <span class="identity-token" :style="{ background: identityColor(p.name) }">{{
@@ -534,6 +535,8 @@ onBeforeUnmount(() => {
               class="mini-btn"
               :class="{ active: p.pinned }"
               :title="p.pinned ? 'Unpin' : 'Pin'"
+              :aria-label="p.pinned ? `Unpin ${p.name}` : `Pin ${p.name}`"
+              :aria-pressed="p.pinned"
               :disabled="spectatorMode"
               @click="togglePin(p)"
             >
@@ -542,15 +545,19 @@ onBeforeUnmount(() => {
             <button
               class="mini-btn"
               title="Decrease weight"
+              :aria-label="`Decrease ${p.name} weight`"
               :disabled="spectatorMode || weightOf(p) <= 1"
               @click="setWeight(p, weightOf(p) - 1)"
             >
               -
             </button>
-            <span class="weight-pill">x{{ weightOf(p) }}</span>
+            <span class="weight-pill" :title="`${p.name} has ${weightOf(p)} ticket${weightOf(p) === 1 ? '' : 's'}`">
+              x{{ weightOf(p) }}
+            </span>
             <button
               class="mini-btn"
               title="Increase weight"
+              :aria-label="`Increase ${p.name} weight`"
               :disabled="spectatorMode || weightOf(p) >= 5"
               @click="setWeight(p, weightOf(p) + 1)"
             >
@@ -569,7 +576,7 @@ onBeforeUnmount(() => {
           </button>
         </li>
       </ul>
-      <p v-else class="empty">{{ active.length === 0 ? 'No participants yet' : 'No matches' }}</p>
+      <p v-else class="empty">{{ active.length === 0 ? 'No active participants' : 'No active matches' }}</p>
     </div>
 
     <div v-if="showPickedSection && (removed.length > 0 || viewMode === 'picked')" class="participants removed-list">
@@ -602,7 +609,7 @@ onBeforeUnmount(() => {
     </div>
 
     <p v-if="searchQuery" class="view-footnote">
-      {{ visibleCount }} visible
+      {{ visibleCount }} visible<span v-if="pinnedCount > 0">, {{ pinnedCount }} pinned</span>
     </p>
   </div>
 </template>
@@ -666,7 +673,7 @@ h2 {
 }
 
 .odds-pill {
-  min-width: 82px;
+  min-width: 104px;
   padding: 8px 10px;
   border: 1px solid var(--accent-border);
   border-radius: 8px;
@@ -688,7 +695,7 @@ h2 {
 
 .stats-strip {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 6px;
   margin-bottom: 14px;
 }
@@ -739,20 +746,16 @@ h2 {
   color: #ffffff;
 }
 
-.rail-controls {
+.control-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
   align-items: center;
   margin-bottom: 12px;
-}
-
-.lab-controls {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
-  align-items: center;
-  margin-bottom: 8px;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(12, 16, 18, 0.28);
 }
 
 .sort-control {
@@ -799,6 +802,10 @@ h2 {
   font-weight: 700;
 }
 
+.sound-toggle {
+  align-self: stretch;
+}
+
 .compact-toggle input {
   position: absolute;
   width: 1px;
@@ -835,15 +842,8 @@ h2 {
   box-shadow: 0 0 0 3px var(--accent-ring);
 }
 
-.sound-row {
-  display: grid;
-  grid-template-columns: auto minmax(90px, 1fr);
-  gap: 10px;
-  align-items: center;
-  margin-bottom: 12px;
-}
-
 .sound-slider {
+  min-width: 0;
   width: 100%;
   accent-color: var(--accent);
 }
@@ -1117,6 +1117,10 @@ ol {
     rgba(255, 255, 255, 0.055);
 }
 
+.participant-item.weighted:not(.pinned) {
+  border-color: rgba(255, 234, 167, 0.18);
+}
+
 .name-cell {
   display: flex;
   align-items: center;
@@ -1177,6 +1181,12 @@ ol {
   font-weight: 800;
 }
 
+.mini-btn[aria-pressed="true"] {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+  color: #ffffff;
+}
+
 .mini-btn:hover:not(:disabled),
 .mini-btn.active {
   border-color: var(--accent-border);
@@ -1199,6 +1209,11 @@ ol {
   font-size: 11px;
   font-weight: 800;
   text-align: center;
+}
+
+.participant-item.weighted .weight-pill {
+  border-color: rgba(255, 234, 167, 0.24);
+  color: #ffeaa7;
 }
 
 .name-list.compact .participant-item {
@@ -1318,5 +1333,25 @@ ol {
   color: #758184;
   font-size: 12px;
   text-align: right;
+}
+
+@media (max-width: 420px) {
+  .stats-strip {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .control-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .participant-item {
+    flex-wrap: wrap;
+  }
+
+  .row-tools {
+    order: 3;
+    width: 100%;
+    justify-content: flex-end;
+  }
 }
 </style>

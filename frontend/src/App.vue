@@ -309,9 +309,14 @@ const pickedPercent = computed(() => {
 })
 const nextOddsLabel = computed(() => {
   if (activeParticipants.value.length === 0) return '0%'
+  const totalWeight = activeParticipants.value.reduce((sum, p) => sum + (p.weight ?? 1), 0)
+  if (activeParticipants.value.some((p) => (p.weight ?? 1) !== 1)) return `${totalWeight} tickets`
   const odds = 100 / activeParticipants.value.length
   return `${odds >= 10 ? Math.round(odds) : odds.toFixed(1)}%`
 })
+const nextOddsCaption = computed(() =>
+  activeParticipants.value.some((p) => (p.weight ?? 1) !== 1) ? 'weighted' : 'next odds',
+)
 const progressStyle = computed(() => ({ width: `${pickedPercent.value}%` }))
 
 function showCopyNotice(message: string) {
@@ -570,7 +575,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
           <div class="session-metrics" aria-label="Session status">
             <span><strong>{{ activeParticipants.length }}</strong> active</span>
             <span><strong>{{ removedParticipants.length }}</strong> picked</span>
-            <span><strong>{{ nextOddsLabel }}</strong> next odds</span>
+            <span><strong>{{ nextOddsLabel }}</strong> {{ nextOddsCaption }}</span>
           </div>
         </div>
         <div class="session-actions">
