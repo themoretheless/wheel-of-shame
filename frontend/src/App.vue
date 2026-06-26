@@ -97,7 +97,6 @@ const createSessionCtrl = useCreateSession({
   create,
   addName,
   startVoiceAdd,
-  ui,
 })
 
 // rosterStore is the single owner (useSession now delegates)
@@ -589,7 +588,6 @@ function onGlobalKeydown(e: KeyboardEvent) {
   <!-- 3D background — fullscreen, behind everything -->
   <WheelCanvas
     ref="wheelRef"
-    :participants="activeParticipants"
     :spinning="spinning"
     :winner-id="winnerId"
     :peek-id="peekId"

@@ -1,5 +1,5 @@
 import { computed, ref } from 'vue'
-import type { Command } from '../components/CommandPalette.vue'
+import type { Command } from '../types/commands'
 import type { Participant } from '../types'
 
 // Extracted from App.vue god component. Palette logic now here.

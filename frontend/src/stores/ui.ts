@@ -68,11 +68,10 @@ export const useUiStore = defineStore('ui', () => {
     }
   }
 
-  // Local UI state that used to live in App.vue
+  // Local UI state that used to live in App.vue. (paletteOpen / shortcutsOpen /
+  // showTemplateGallery were declared here but the app binds the cmdPalette and
+  // createSession owners instead, so they were dead; removed.)
   const recentsOpen = ref(false)
-  const paletteOpen = ref(false)
-  const shortcutsOpen = ref(false)
-  const showTemplateGallery = ref(false)
 
   const cameraDrifted = ref(false)
 
@@ -134,9 +133,6 @@ export const useUiStore = defineStore('ui', () => {
 
     // Modals / overlays
     recentsOpen,
-    paletteOpen,
-    shortcutsOpen,
-    showTemplateGallery,
     cameraDrifted,
     setCameraDrifted,
 

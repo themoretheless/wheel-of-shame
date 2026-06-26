@@ -1,4 +1,4 @@
-import type { Session, SessionData, SpinResult, Participant, SegmentVisual } from '../types'
+import type { Session, SessionData, SpinResult, Participant, SegmentVisual, Action, Snapshot } from '../types'
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080'
 
@@ -81,11 +81,11 @@ export function updateParticipantProps(
   })
 }
 
-export function listActions(sessionId: string, limit = 50): Promise<any[]> {
+export function listActions(sessionId: string, limit = 50): Promise<Action[]> {
   return request(`/api/v1/sessions/${sessionId}/actions?limit=${limit}`)
 }
 
-export function getSnapshot(sessionId: string, beforeActionId?: string): Promise<any> {
+export function getSnapshot(sessionId: string, beforeActionId?: string): Promise<Snapshot | null> {
   const q = beforeActionId ? `?before=${beforeActionId}` : ''
   return request(`/api/v1/sessions/${sessionId}/snapshot${q}`)
 }

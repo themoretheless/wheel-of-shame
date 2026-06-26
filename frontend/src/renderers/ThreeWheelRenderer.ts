@@ -10,8 +10,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js'
-import opentype from 'opentype.js'
-import type { PreparedSegment } from '../components/WheelCanvas.vue'
+import type { PreparedSegment } from '../types/wheel'
 import type { WheelRenderer } from './WheelRenderer'
 import { segmentIdAtRotation } from '../utils/wheel'
 
@@ -77,9 +76,6 @@ export class ThreeWheelRenderer implements WheelRenderer {
   private sharedDividerGeo: THREE.BufferGeometry | null = null
   private sharedPegGeo: THREE.CylinderGeometry | null = null
   private sharedPegMat: THREE.MeshStandardMaterial | null = null
-
-  // Font for labels (best effort)
-  private _otFont: any = null
 
   private getCachedMat(color: string, metalness: number, roughness: number, emissiveIntensity = 0): THREE.Material {
     const key = `${color}_${metalness}_${roughness}_${emissiveIntensity.toFixed(2)}`
@@ -180,7 +176,7 @@ export class ThreeWheelRenderer implements WheelRenderer {
 
     this.initScene()
     this.initAudio()
-    this.loadFont()
+    this.build([]) // initial placeholder wheel until prepared segments arrive
     this.startRenderLoop()
 
     // Basic interactions
@@ -197,7 +193,7 @@ export class ThreeWheelRenderer implements WheelRenderer {
       this.isMuted = localStorage.getItem(this.muteKey) === '1'
     } catch {}
     // touch unused for build (future use in pointer/hover/font)
-    void this._pegSpacing; void this._isPointerDown; void this._cameraDrifted; void this._otFont; void this._setMuted; void this._hoveredSeg; void this._onWinner; void this._onDrift
+    void this._pegSpacing; void this._isPointerDown; void this._cameraDrifted; void this._setMuted; void this._hoveredSeg; void this._onWinner; void this._onDrift
   }
 
   private initScene() {
@@ -262,15 +258,6 @@ export class ThreeWheelRenderer implements WheelRenderer {
     return typeof window !== 'undefined' &&
       window.matchMedia &&
       window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  }
-
-  private loadFont() {
-    opentype.load('/Roboto-Bold.ttf', (_err: any, font: any) => {
-      if (font) {
-        this._otFont = font
-        this.build([]) // will rebuild when data arrives via watch
-      }
-    })
   }
 
   private initAudio() {

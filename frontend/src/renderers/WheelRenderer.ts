@@ -9,7 +9,7 @@
  * Prepared segments are the contract.
  */
 
-import type { PreparedSegment } from '../components/WheelCanvas.vue'
+import type { PreparedSegment } from '../types/wheel'
 
 export interface WheelRenderer {
   /** Full (re)build. Expensive - use sparingly. */
