@@ -5,7 +5,6 @@ export function useCreateSession(deps: {
   create: (title: string) => Promise<void>
   addName: (name: string) => Promise<void>
   startVoiceAdd: () => void
-  ui: any
 }) {
   const titleInput = ref('')
   const templateSelect = ref('')
@@ -30,19 +29,12 @@ export function useCreateSession(deps: {
     templateSelect.value = ''
   }
 
-  function applyTemplate(t: any) {
-    templateSelect.value = t.id
-    createSession()
-    deps.ui.showTemplateGallery = false
-  }
-
   return {
     titleInput,
     templateSelect,
     showTemplateGallery,
     SEED_TEMPLATES,
     createSession,
-    applyTemplate,
     startVoiceAdd: deps.startVoiceAdd,
   }
 }

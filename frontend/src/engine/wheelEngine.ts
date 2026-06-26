@@ -12,6 +12,7 @@
 
 import { computeAngles, weightedPickIndex, simulateSpins, filterPreventRepeat } from '../utils/wheel'
 import type { Participant } from '../types'
+import type { PreparedSegment } from '../types/wheel'
 
 export interface WheelSegment {
   id: string
@@ -102,15 +103,7 @@ export class WheelEngine {
    * Returns ready-to-render segments with precomputed angle + visual flags.
    * This is what WheelCanvas should receive (per "from scratch" perf design).
    */
-  getPreparedSegments(): Array<{
-    id: string
-    name: string
-    weight: number
-    angle: number
-    color: string
-    isLast: boolean
-    isPrevented: boolean
-  }> {
+  getPreparedSegments(): PreparedSegment[] {
     const angles = computeAngles(this.segments)
     const last = this.lastPickedId
     const prevent = this.preventRepeat

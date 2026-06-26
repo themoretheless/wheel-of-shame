@@ -2,19 +2,12 @@
 import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import ThreeWheelRenderer from '../renderers/ThreeWheelRenderer'
 import type { WheelRenderer } from '../renderers/WheelRenderer'
+import type { PreparedSegment } from '../types/wheel'
 
-export interface PreparedSegment {
-  id: string
-  name?: string
-  weight: number
-  angle: number
-  color: string
-  isLast?: boolean
-  isPrevented?: boolean
-}
+// Re-exported so any existing import of this contract from the SFC keeps working.
+export type { PreparedSegment }
 
 const props = defineProps<{
-  participants?: any[]
   spinning: boolean
   winnerId: string | null
   peekId?: string | null

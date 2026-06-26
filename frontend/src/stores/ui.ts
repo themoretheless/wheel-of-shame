@@ -56,7 +56,9 @@ export const useUiStore = defineStore('ui', () => {
   function toggleTheme() {
     currentTheme.value = currentTheme.value === 'default' ? 'high-contrast' : 'default'
     if (typeof document !== 'undefined') {
-      document.documentElement.className = currentTheme.value
+      // Set a data attribute rather than overwriting className, which would wipe
+      // any other classes on <html> (reduced-motion helpers, future skins).
+      document.documentElement.dataset.theme = currentTheme.value
     }
   }
   function updateThemeColor(color: string) {
@@ -66,11 +68,10 @@ export const useUiStore = defineStore('ui', () => {
     }
   }
 
-  // Local UI state that used to live in App.vue
+  // Local UI state that used to live in App.vue. (paletteOpen / shortcutsOpen /
+  // showTemplateGallery were declared here but the app binds the cmdPalette and
+  // createSession owners instead, so they were dead; removed.)
   const recentsOpen = ref(false)
-  const paletteOpen = ref(false)
-  const shortcutsOpen = ref(false)
-  const showTemplateGallery = ref(false)
 
   const cameraDrifted = ref(false)
 
@@ -132,9 +133,6 @@ export const useUiStore = defineStore('ui', () => {
 
     // Modals / overlays
     recentsOpen,
-    paletteOpen,
-    shortcutsOpen,
-    showTemplateGallery,
     cameraDrifted,
     setCameraDrifted,
 

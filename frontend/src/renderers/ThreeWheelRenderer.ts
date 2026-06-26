@@ -10,10 +10,10 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js'
-import opentype from 'opentype.js'
-import type { PreparedSegment } from '../components/WheelCanvas.vue'
+import type { PreparedSegment } from '../types/wheel'
 import type { WheelRenderer } from './WheelRenderer'
 import { segmentIdAtRotation } from '../utils/wheel'
+import { WheelAudio } from './three/WheelAudio'
 
 const WHEEL_RADIUS = 2.2
 const WHEEL_INNER = 0.6
@@ -64,8 +64,8 @@ export class ThreeWheelRenderer implements WheelRenderer {
   private _cameraDrifted = false
   private homeCamZ = BASE_CAM_Z
 
-  // Audio (lightweight)
-  private audioCtx: AudioContext | null = null
+  // Audio + haptics, encapsulated in a collaborator.
+  private audio: WheelAudio | null = null
   private isMuted = false
   private muteKey = 'wheel-muted'
 
@@ -75,9 +75,6 @@ export class ThreeWheelRenderer implements WheelRenderer {
   private sharedDividerGeo: THREE.BufferGeometry | null = null
   private sharedPegGeo: THREE.CylinderGeometry | null = null
   private sharedPegMat: THREE.MeshStandardMaterial | null = null
-
-  // Font for labels (best effort)
-  private _otFont: any = null
 
   private getCachedMat(color: string, metalness: number, roughness: number, emissiveIntensity = 0): THREE.Material {
     const key = `${color}_${metalness}_${roughness}_${emissiveIntensity.toFixed(2)}`
@@ -177,8 +174,8 @@ export class ThreeWheelRenderer implements WheelRenderer {
     this.onSpinClick = callbacks.onSpinClick
 
     this.initScene()
-    this.initAudio()
-    this.loadFont()
+    this.audio = new WheelAudio()
+    this.build([]) // initial placeholder wheel until prepared segments arrive
     this.startRenderLoop()
 
     // Basic interactions
@@ -194,8 +191,9 @@ export class ThreeWheelRenderer implements WheelRenderer {
     try {
       this.isMuted = localStorage.getItem(this.muteKey) === '1'
     } catch {}
+    this.audio?.setMuted(this.isMuted)
     // touch unused for build (future use in pointer/hover/font)
-    void this._pegSpacing; void this._isPointerDown; void this._cameraDrifted; void this._otFont; void this._setMuted; void this._hoveredSeg; void this._onWinner; void this._onDrift
+    void this._pegSpacing; void this._isPointerDown; void this._cameraDrifted; void this._hoveredSeg; void this._onWinner; void this._onDrift
   }
 
   private initScene() {
@@ -262,57 +260,13 @@ export class ThreeWheelRenderer implements WheelRenderer {
       window.matchMedia('(prefers-reduced-motion: reduce)').matches
   }
 
-  private loadFont() {
-    opentype.load('/Roboto-Bold.ttf', (_err: any, font: any) => {
-      if (font) {
-        this._otFont = font
-        this.build([]) // will rebuild when data arrives via watch
-      }
-    })
-  }
-
-  private initAudio() {
+  // Pick black or white ink for legibility over a fill via relative luminance.
+  private contrastInk(color: string): string {
     try {
-      this.audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)()
-    } catch {}
-  }
-
-  private _setMuted(m: boolean) {
-    this.isMuted = m
-  }
-
-  // Rising-pitch tick: pitch climbs with spin progress (a drumroll into the
-  // landing) and the gain swells on the final slow-mo stretch. progress is the
-  // eased spin t in [0,1]; boost lifts the volume for the last dramatic ticks.
-  private playTick(progress = 0, boost = false) {
-    if (this.isMuted || !this.audioCtx) return
-    try {
-      const o = this.audioCtx.createOscillator()
-      const g = this.audioCtx.createGain()
-      o.type = 'square'
-      const clamped = progress < 0 ? 0 : progress > 1 ? 1 : progress
-      o.frequency.value = 660 + clamped * 540 // 660Hz -> 1200Hz across the spin
-      g.gain.value = boost ? 0.032 : 0.02
-      o.connect(g)
-      g.connect(this.audioCtx.destination)
-      o.start()
-      setTimeout(() => { g.gain.value = 0; o.stop() }, 40)
-    } catch {}
-  }
-
-  private playThunk() {
-    if (this.isMuted || !this.audioCtx) return
-    try {
-      const o = this.audioCtx.createOscillator()
-      const g = this.audioCtx.createGain()
-      o.type = 'sine'
-      o.frequency.value = 140
-      g.gain.value = 0.25
-      o.connect(g)
-      g.connect(this.audioCtx.destination)
-      o.start()
-      setTimeout(() => { g.gain.value = 0; o.stop() }, 180)
-    } catch {}
+      const col = new THREE.Color(color)
+      const lum = 0.2126 * col.r + 0.7152 * col.g + 0.0722 * col.b
+      return lum > 0.55 ? '#000000' : '#ffffff'
+    } catch { return '#000000' }
   }
 
   private onResize() {
@@ -423,18 +377,33 @@ export class ThreeWheelRenderer implements WheelRenderer {
     this.markDirty()
   }
 
-  private makeSimpleLabel(name: string, _color: string): THREE.Object3D | null {
+  private makeSimpleLabel(name: string, color: string): THREE.Object3D | null {
     // lightweight label using canvas texture (avoids full opentype curved port complexity here)
     try {
-      const size = 64
+      // Render at devicePixelRatio (capped at 2, matching the renderer) so labels
+      // stay crisp on retina instead of the old fixed 256x64 blur.
+      const dpr = Math.min(typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1, 2)
+      const baseW = 256
+      const baseH = 64
       const c = document.createElement('canvas')
-      c.width = 256
-      c.height = size
+      c.width = baseW * dpr
+      c.height = baseH * dpr
       const ctx = c.getContext('2d')!
+      ctx.scale(dpr, dpr)
       ctx.font = 'bold 28px Roboto, sans-serif'
-      ctx.fillStyle = '#000'
-      ctx.fillText(name.length > 18 ? name.slice(0,17)+'…' : name, 8, 40)
+      const text = name.length > 18 ? name.slice(0, 17) + '…' : name
+      // Contrast-aware ink: dark text over light segment fills, light over dark,
+      // so names stay legible across the whole hashed identity palette. A thin
+      // opposite-color halo decouples legibility from the fill and bloom wash.
+      const ink = this.contrastInk(color)
+      ctx.lineWidth = 3
+      ctx.lineJoin = 'round'
+      ctx.strokeStyle = ink === '#000000' ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.85)'
+      ctx.strokeText(text, 8, 40)
+      ctx.fillStyle = ink
+      ctx.fillText(text, 8, 40)
       const tex = new THREE.CanvasTexture(c)
+      if (this.renderer) tex.anisotropy = this.renderer.capabilities.getMaxAnisotropy()
       const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, side: THREE.DoubleSide })
       const plane = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 0.32), mat)
       return plane
@@ -525,9 +494,14 @@ export class ThreeWheelRenderer implements WheelRenderer {
     }
 
     const reduced = this.prefersReducedMotion()
-    const full = reduced ? 0 : (Math.PI * 2 * (4 + Math.floor(Math.random() * 3)) * dir)
+    // Scale the spin's energy to the roster size: a tiny wheel shouldn't spin as
+    // long or as many turns as a crowded one. Bounded so it stays snappy at both
+    // extremes (~3.0s/5 turns for a handful of names, ~3.7s/8 turns for ~30+).
+    const sizeFactor = Math.min(1.5, Math.max(0.7, Math.sqrt(activeCount / 8)))
+    const turns = 3 + Math.round(sizeFactor * 2) + Math.floor(Math.random() * 2)
+    const full = reduced ? 0 : (Math.PI * 2 * turns * dir)
     const total = full + delta
-    const dur = reduced ? 520 : 3200
+    const dur = reduced ? 520 : Math.round(2600 + 700 * sizeFactor)
     const windDur = reduced ? 0 : 180
     const wind = reduced ? 0 : -dir * 0.1
     const startRot = this.currentRotation
@@ -566,12 +540,20 @@ export class ThreeWheelRenderer implements WheelRenderer {
         this.wheelGroup.scale.set(s, s, 1)
       }
 
+      // Bloom glows hottest mid-spin and cools into the slow-mo tail, so the
+      // wheel reads as energized then settling onto the winner.
+      if (!reduced && this.bloomPass) {
+        const heat = Math.sin(Math.min(t / SLOWMO_START, 1) * Math.PI)
+        this.bloomPass.strength = 0.6 + 0.5 * heat
+      }
+
       // tick on segment cross (pure mapping, unit-tested in utils/wheel.test.ts)
       const id = segmentIdAtRotation(this.currentRotation, this.spinSegmentIds)
       if (id && id !== this.lastTickSegment) {
         this.lastTickSegment = id
         this.onTick(id)
-        this.playTick(t, t > SLOWMO_START)
+        this.audio?.tick(t, t > SLOWMO_START)
+        this.audio?.vibrate(8) // felt drumroll on mobile; no-op on desktop
       }
 
       if (t < 1) {
@@ -588,7 +570,9 @@ export class ThreeWheelRenderer implements WheelRenderer {
           }
           this.isSpinAnimating = false
           if (this.controls) this.controls.enabled = true
-          this.playThunk()
+          if (this.bloomPass) this.bloomPass.strength = 0.6 // back to resting glow
+          this.audio?.thunk()
+          this.audio?.vibrate([30, 40, 18]) // landing impact in the palm
           this.onTick(null)
           onComplete()
           if (this.onSpinComplete) this.onSpinComplete(winnerId)
@@ -634,6 +618,7 @@ export class ThreeWheelRenderer implements WheelRenderer {
   toggleMute() {
     this.isMuted = !this.isMuted
     try { localStorage.setItem(this.muteKey, this.isMuted ? '1' : '0') } catch {}
+    this.audio?.setMuted(this.isMuted)
   }
 
   private onCanvasClick(_e: MouseEvent) {
@@ -667,6 +652,7 @@ export class ThreeWheelRenderer implements WheelRenderer {
 
   dispose() {
     cancelAnimationFrame(this.animFrameId)
+    this.audio?.dispose()
     if (this.controls) this.controls.dispose()
     if (this.renderer) {
       this.renderer.domElement.remove()

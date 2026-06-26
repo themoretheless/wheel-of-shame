@@ -97,7 +97,6 @@ const createSessionCtrl = useCreateSession({
   create,
   addName,
   startVoiceAdd,
-  ui,
 })
 
 // rosterStore is the single owner (useSession now delegates)
@@ -259,6 +258,15 @@ const focusAnnounce = computed(() => {
   const idx = activeParticipants.value.findIndex((p) => p.id === id)
   const odds = Math.round(((angles[idx] || 0) / total) * 100)
   return `${hit.name}, ${odds}% chance`
+})
+
+// The spin's climax for screen readers: pushed to an assertive aria-live region
+// so the eliminated name and remaining count interrupt and are spoken at once,
+// rather than queuing behind the polite focus announcer.
+const winnerAnnounce = computed(() => {
+  const w = spin.winnerData.value
+  if (!w) return ''
+  return `Picked ${w.name}. ${w.remaining} remaining.`
 })
 // Identity color of the segment currently under the pointer, pulled through the
 // chrome as the --live-accent CSS var: the dock gains a thin accent bar and the
@@ -449,6 +457,14 @@ function onSpinComplete(_participantId: string) {
 function copyLink() {
   if (!session.value) return
   const url = `${window.location.origin}${window.location.pathname}#/${session.value.id}`
+  // On platforms with the Web Share API (most mobile, some desktop), open the
+  // native share sheet, which is the expected affordance there. Cancelling is a
+  // no-op. Everywhere else, fall back to copying the link to the clipboard.
+  const nav = navigator as Navigator & { share?: (data: { title?: string; url?: string }) => Promise<void> }
+  if (typeof nav.share === 'function') {
+    nav.share({ title: session.value.title || 'Wheel of Shame', url }).catch(() => {})
+    return
+  }
   navigator.clipboard.writeText(url).then(
     () => pushToast('Share link copied', 'success'),
     () => pushToast('Could not copy link', 'info'),
@@ -499,7 +515,20 @@ function handlePreviewWeight(id: string, weight: number) {
 }
 
 async function handleUpdateWeight(id: string, weight: number) {
+  // Capture the pre-edit weight before the store mutates it, so a committed
+  // weight change gets the same Undo affordance a removal already has.
+  const before = activeParticipants.value.find((pp) => pp.id === id)
+  const prevWeight = before?.weight ?? 1
+  const name = before?.name
+
   await roster.updateWeight(id, weight)
+
+  if (name && Math.abs(prevWeight - weight) > 0.001) {
+    pushToast(`${name} bias -> ${weight.toFixed(1)}x`, 'info', identityColor(name), false, {
+      label: 'Undo',
+      run: () => { handleUpdateWeight(id, prevWeight) },
+    })
+  }
 
   const h = history as UseHistory | undefined
   if (h?.recordAction && session.value) {
@@ -559,7 +588,6 @@ function onGlobalKeydown(e: KeyboardEvent) {
   <!-- 3D background — fullscreen, behind everything -->
   <WheelCanvas
     ref="wheelRef"
-    :participants="activeParticipants"
     :spinning="spinning"
     :winner-id="winnerId"
     :peek-id="peekId"
@@ -590,6 +618,9 @@ function onGlobalKeydown(e: KeyboardEvent) {
     <!-- Roving focus ring announcer: as Tab walks the wheel, the focused name
          and its odds are spoken here for screen readers. -->
     <span class="visually-hidden" aria-live="polite">{{ focusAnnounce }}</span>
+    <!-- Spin climax announcer: the eliminated name and remaining count, spoken
+         assertively so it interrupts the polite focus updates. -->
+    <span class="sr-only" aria-live="assertive">{{ winnerAnnounce }}</span>
 
     <!-- Snap-home pill: appears when the orbit camera is dragged off its
          resting framing, restoring the default view on click. -->
@@ -804,6 +835,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
             v-if="isEditor && history && !panelCollapsed.history"
             :actions="history.actions.value || []"
             :session-id="session?.id || ''"
+            :participants="[...activeParticipants, ...removedParticipants]"
             @restore=" (_id) => { if (_id && history.restoreTo) history.restoreTo(_id) } "
             @preview=" (id) => { if (id) previewFromHistory(id); else roster.clearPreviews() } "
           />

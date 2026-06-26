@@ -1,6 +1,7 @@
 import { ref, computed, type ComputedRef } from 'vue'
 import type { Action } from '../types'
 import * as api from '../api/client'
+import { useRosterStore } from '../stores/roster'
 import { useToasts } from './useToasts'
 
 const { push: pushToast } = useToasts()
@@ -26,8 +27,7 @@ export function useHistory(sessionId: string): UseHistory {
   async function loadActions() {
     if (!sessionId) return
     try {
-      const list = await api.listActions(sessionId)
-      actions.value = list as Action[]
+      actions.value = await api.listActions(sessionId)
     } catch {
       actions.value = []
     }
@@ -48,8 +48,8 @@ export function useHistory(sessionId: string): UseHistory {
       if (snap && snap.participants) {
         // Delegate restore to rosterStore (single owner)
         // In a full implementation roster would apply a "Restore" event.
-        const roster = (await import('../stores/roster')).useRosterStore()
-        roster.setParticipants((snap.participants as any[]).map(p => ({ ...p })))
+        const roster = useRosterStore()
+        roster.setParticipants(snap.participants.map((p) => ({ ...p })))
         recordAction({
           id: 'local-undo-' + Date.now(),
           session_id: sessionId,
@@ -71,8 +71,8 @@ export function useHistory(sessionId: string): UseHistory {
     try {
       const snap = await api.getSnapshot(sessionId, actionId)
       if (snap && snap.participants) {
-        const roster = (await import('../stores/roster')).useRosterStore()
-        roster.setParticipants((snap.participants as any[]).map((p: any) => ({ ...p })))
+        const roster = useRosterStore()
+        roster.setParticipants(snap.participants.map((p) => ({ ...p })))
         await api.restoreFromSnapshot(sessionId, snap.participants).catch(() => {})
         pushToast('Restored to point in history', 'info')
       }
@@ -87,7 +87,7 @@ export function useHistory(sessionId: string): UseHistory {
     try {
       const snap = await api.getSnapshot(sessionId, actionId)
       if (snap && snap.participants) {
-        const roster = (await import('../stores/roster')).useRosterStore()
+        const roster = useRosterStore()
         roster.setParticipants(snap.participants.map((p: any) => ({ ...p, _preview: true })))
       }
     } catch (e) {

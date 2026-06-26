@@ -18,7 +18,6 @@ export default defineConfig({
         // the lazily-imported WheelCanvas, so they still load on demand.
         manualChunks(id: string) {
           if (id.includes('node_modules/three')) return 'three'
-          if (id.includes('node_modules/opentype.js')) return 'opentype'
         },
       },
     },

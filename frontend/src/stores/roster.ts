@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
 import type { Participant, SpinResult } from '../types'
+import type { PreparedSegment } from '../types/wheel'
 import { usePreventRepeat } from '../composables/usePreventRepeat'
 import { usePreview } from '../composables/usePreview' // temporary bridge - will remove
 import { WheelEngine, type WheelSegment } from '../engine/wheelEngine'
@@ -251,7 +252,7 @@ export const useRosterStore = defineStore('roster', () => {
   }
 
   // Prepared segments - now default via worker for heavy computeAngles (point from redesign)
-  const preparedSegments = ref<any[]>([])
+  const preparedSegments = ref<PreparedSegment[]>([])
 
   async function refreshPreparedSegments() {
     syncEngine()
@@ -308,35 +309,11 @@ export const useRosterStore = defineStore('roster', () => {
     return prevent.applyPreventFilter(candidates)
   }
 
-  // Derived for wheel
-  const effectiveForWheel = computed(() => {
-    const overrides = previewOverrides.value
-    return activeParticipants.value.map(p => {
-      const o = overrides[p.id] || {}
-      return {
-        ...p,
-        weight: o.weight !== undefined ? o.weight : p.weight,
-        visual: o.visual !== undefined ? o.visual : p.visual
-      }
-    })
-  })
-
-  // Use the pure engine for high level operations
-  function doPick(): any {
-    syncEngine()
-    const result = engine.value.pick()
-    if (result && result.picked) {
-      setLastPicked(result.picked.id)
-    }
-    return result
-  }
-
   return {
     participants,
     activeParticipants,
     removedParticipants,
     previewOverrides,
-    effectiveForWheel,
 
     setParticipants,
     add,
@@ -353,7 +330,6 @@ export const useRosterStore = defineStore('roster', () => {
     togglePreventRepeat,
     applyPreventFilter,
 
-    doPick,
     engine,
     preparedSegments,
     simulateHeavy,
