@@ -1,11 +1,25 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from 'vue'
-import type { Action } from '../types'
+import type { Action, Participant } from '../types'
 
 const props = defineProps<{
   actions: Action[]
   sessionId: string
+  // Active + removed roster, so an action's participant id resolves to a name
+  // instead of a raw UUID stub in the timeline.
+  participants?: Participant[]
 }>()
+
+// id -> name lookup for humanizing the history rows.
+const nameById = computed(() => {
+  const map: Record<string, string> = {}
+  for (const p of props.participants ?? []) map[p.id] = p.name
+  return map
+})
+function nameFor(id: string | undefined): string {
+  if (!id) return ''
+  return nameById.value[id] ?? id.slice(0, 8)
+}
 
 const emit = defineEmits<{
   (e: 'restore', actionId: string): void
@@ -52,11 +66,12 @@ function formatAction(action: Action) {
   const type = kind.type || 'unknown'
   const payload = kind.payload || {}
   let label = type
-  if (type === 'Spin') label = `Spin: ${payload.picked_id?.slice(0,8) || ''}`
-  else if (type === 'UpdateWeight') label = `Weight ${payload.id?.slice(0,8)} = ${payload.weight}`
-  else if (type === 'UpdateVisual') label = `Visual for ${payload.id?.slice(0,8)}`
+  if (type === 'Spin') label = `Spin: ${nameFor(payload.picked_id)}`
+  else if (type === 'UpdateWeight') label = `Weight ${nameFor(payload.id)} = ${payload.weight}`
+  else if (type === 'UpdateVisual') label = `Visual for ${nameFor(payload.id)}`
   else if (type === 'Add') label = `Add ${payload.name}`
-  else if (type === 'Remove') label = `Remove ${payload.id?.slice(0,8)}`
+  else if (type === 'Remove') label = `Remove ${nameFor(payload.id)}`
+  else if (type === 'Comment') label = `Comment on ${nameFor(payload.participant_id)}`
   return `${new Date(action.timestamp).toLocaleTimeString()} - ${label}`
 }
 

@@ -65,13 +65,15 @@ function submitComment() {
         max="10"
         step="0.1"
         :value="selected.weight ?? 1"
+        aria-label="Bias weight"
+        :aria-valuetext="(selected.weight ?? 1).toFixed(1) + 'x bias'"
         @input="onWeightInput"
         @change="commitWeight"
         @keyup.enter="commitWeight"
         @pointerup="commitWeight"
       />
-      <button @click="adjustWeight(-0.5)" class="btn-small" title="Decrease bias">−</button>
-      <button @click="adjustWeight(0.5)" class="btn-small" title="Increase bias">+</button>
+      <button @click="adjustWeight(-0.5)" class="btn-small" title="Decrease bias" aria-label="Decrease bias by 0.5">−</button>
+      <button @click="adjustWeight(0.5)" class="btn-small" title="Increase bias" aria-label="Increase bias by 0.5">+</button>
     </div>
 
     <!-- v1 minimal: color/icon future -->

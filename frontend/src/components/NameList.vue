@@ -333,6 +333,7 @@ function addName() {
                  next, rolled to its new value as the roster changes. Hidden on
                  pending/error rows, which carry no odds (their bar is hidden
                  too). -->
+            <span v-if="!p.pending && !p.error" class="sr-only">{{ p.name }}, {{ getOdds(p).toFixed(0) }} percent chance to be picked</span>
             <span v-if="!p.pending && !p.error" class="odds-pct" aria-hidden="true">{{
               getOdds(p).toFixed(0)
             }}%</span>

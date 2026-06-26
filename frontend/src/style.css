@@ -17,17 +17,35 @@ body {
   min-height: 100vh;
 }
 
-/* Theming (new idea) */
-.high-contrast {
+/* Theming. Driven by [data-theme] (set on <html> by the ui store) so toggling a
+   theme never clobbers other root classes; the legacy .high-contrast class is
+   kept as an alias for backward compatibility. */
+.high-contrast,
+[data-theme='high-contrast'] {
   --bg: #000;
   --fg: #fff;
   background: #000;
   color: #fff;
 }
-.high-contrast kbd {
+.high-contrast kbd,
+[data-theme='high-contrast'] kbd {
   background: #fff;
   color: #000;
   border-color: #000;
+}
+
+/* Screen-reader-only utility: present in the a11y tree, invisible on screen.
+   Used by the spin announcer, roster odds, and other narration spans. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
 }
 
 /* ============================================================
@@ -40,7 +58,11 @@ body {
    global rules below, so the ring is consistent app-wide.
    ============================================================ */
 :root {
-  --accent: #4ECDC4;
+  /* --accent flows through --theme-accent, which the color picker writes onto
+     <html> (ui.updateThemeColor). So picking a color now actually retints the
+     focus ring and anything else bound to var(--accent), with the brand teal as
+     the fallback when no custom color is set. */
+  --accent: var(--theme-accent, #4ECDC4);
   --focus-ring-width: 2px;
   --focus-ring-offset: 2px;
 }
@@ -56,7 +78,8 @@ body {
 }
 
 /* High-contrast mode: a thicker, pure-white ring for maximum legibility. */
-.high-contrast :focus-visible {
+.high-contrast :focus-visible,
+[data-theme='high-contrast'] :focus-visible {
   outline-width: 3px;
   outline-color: #fff;
 }

@@ -56,7 +56,9 @@ export const useUiStore = defineStore('ui', () => {
   function toggleTheme() {
     currentTheme.value = currentTheme.value === 'default' ? 'high-contrast' : 'default'
     if (typeof document !== 'undefined') {
-      document.documentElement.className = currentTheme.value
+      // Set a data attribute rather than overwriting className, which would wipe
+      // any other classes on <html> (reduced-motion helpers, future skins).
+      document.documentElement.dataset.theme = currentTheme.value
     }
   }
   function updateThemeColor(color: string) {
