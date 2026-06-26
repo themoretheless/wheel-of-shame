@@ -8,6 +8,18 @@ We reach the from-scratch design incrementally. Phase 0 deletes dead code and mo
 
 The single most valuable structural insight across all ten critics: **the "domain core" lies.** The server picks the winner (`useSession.doSpin -> api.spin`), so the entire client `WheelEngine.pick`/`doPick` path, `effectiveForWheel`, prevent-repeat-as-rule, and bias logic are dead. Likewise the event log is recorded in three uncoordinated places and folded by no one, and `useHistory` silently no-ops every operation because its `sessionId` closure is permanently `''`. Honesty about where decisions actually happen drives most of this plan.
 
+## Status
+
+Phase 0 (all 11 items) is implemented and merged to `main` (commits `fcebd6f`,
+`6ea5729`): the type contracts moved into `types/`, dead code deleted, the
+opentype chunk removed, the INEFFECTIVE_DYNAMIC_IMPORT warning fixed, and the
+renderer's audio + haptics extracted into a `WheelAudio` collaborator. Phases 1
+to 3 below are not yet started. For a severity-ranked list of concrete defects
+still in the code (several beyond this structural plan: GPU resource leaks on
+every rebuild, a wrong-slice spin landing under non-uniform weights, the dead
+winner-reveal callback, and a Tab handler that breaks focus traversal), see
+[recommendation.md](recommendation.md).
+
 ## Verified ground truth (spot-checked against source)
 
 - `useHistory(sessionId: string)` (useHistory.ts:22) closes over a plain string. `useSession` builds it as `useHistory('')` (useSession.ts:18) and `setHistorySession` (useSession.ts:19-22) writes `(history as ...)._sessionId = id`, which **no method in useHistory reads**. Every guard is `if (!sessionId) return`, so `loadActions/undo/restoreTo/preview` permanently no-op. This is a live defect, not a smell.
@@ -88,7 +100,7 @@ The two enforcement mechanisms that make this stick: a **dependency-cruiser conf
 
 ---
 
-## Phase 0: Behavior-preserving quick wins (build + tests validate everything)
+## Phase 0 (DONE, merged): Behavior-preserving quick wins (build + tests validate everything)
 
 All items here are confirmed-unused deletions or pure type/import moves. Validation: `npm run build` (which runs `vue-tsc -b` then `vite build`) and `npm run test`. Several also remove the INEFFECTIVE_DYNAMIC_IMPORT warning and a whole bundle chunk.
 

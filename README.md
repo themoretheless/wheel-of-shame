@@ -81,11 +81,18 @@ coupling issues, and a concrete phased plan to get there (modularity,
 decomposition, loose coupling, single state ownership, an event-sourced action
 log folded by one pure projector, and a renderer behind a headless-testable
 interface) are written up in **[architecture.md](architecture.md)**, synthesized
-from a 10-lens architecture review.
+from a 10-lens architecture review. Phase 0 of that plan is merged; the rest is
+sequenced there.
+
+A severity-ranked list of the concrete defects to fix next (the top 50, from a
+13-lens code audit) is in **[recommendation.md](recommendation.md)**.
 
 ## Design docs
 
-- [architecture.md](architecture.md) - target architecture + refactoring plan.
+- [architecture.md](architecture.md) - target architecture + refactoring plan
+  (Phase 0 done).
+- [recommendation.md](recommendation.md) - top 50 things currently done wrong,
+  severity-ranked with concrete fixes and effort.
 - [design-docs/from-scratch-redesign.md](design-docs/from-scratch-redesign.md) -
   what a from-scratch rebuild would change, and the incremental path there.
 - [design-docs/top-100-ideas.md](design-docs/top-100-ideas.md),
