@@ -13,6 +13,7 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js'
 import type { PreparedSegment } from '../types/wheel'
 import type { WheelRenderer } from './WheelRenderer'
 import { segmentIdAtRotation } from '../utils/wheel'
+import { WheelAudio } from './three/WheelAudio'
 
 const WHEEL_RADIUS = 2.2
 const WHEEL_INNER = 0.6
@@ -63,10 +64,8 @@ export class ThreeWheelRenderer implements WheelRenderer {
   private _cameraDrifted = false
   private homeCamZ = BASE_CAM_Z
 
-  // Audio (lightweight)
-  private audioCtx: AudioContext | null = null
-  private masterGain: GainNode | null = null
-  private audioResume: (() => void) | null = null
+  // Audio + haptics, encapsulated in a collaborator.
+  private audio: WheelAudio | null = null
   private isMuted = false
   private muteKey = 'wheel-muted'
 
@@ -175,7 +174,7 @@ export class ThreeWheelRenderer implements WheelRenderer {
     this.onSpinClick = callbacks.onSpinClick
 
     this.initScene()
-    this.initAudio()
+    this.audio = new WheelAudio()
     this.build([]) // initial placeholder wheel until prepared segments arrive
     this.startRenderLoop()
 
@@ -192,8 +191,9 @@ export class ThreeWheelRenderer implements WheelRenderer {
     try {
       this.isMuted = localStorage.getItem(this.muteKey) === '1'
     } catch {}
+    this.audio?.setMuted(this.isMuted)
     // touch unused for build (future use in pointer/hover/font)
-    void this._pegSpacing; void this._isPointerDown; void this._cameraDrifted; void this._setMuted; void this._hoveredSeg; void this._onWinner; void this._onDrift
+    void this._pegSpacing; void this._isPointerDown; void this._cameraDrifted; void this._hoveredSeg; void this._onWinner; void this._onDrift
   }
 
   private initScene() {
@@ -258,91 +258,6 @@ export class ThreeWheelRenderer implements WheelRenderer {
     return typeof window !== 'undefined' &&
       window.matchMedia &&
       window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  }
-
-  private initAudio() {
-    try {
-      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)()
-      this.audioCtx = ctx
-      // Master bus: ticks/thunk -> masterGain -> compressor -> destination, so
-      // overlapping ticks have headroom and never clip.
-      this.masterGain = ctx.createGain()
-      this.masterGain.gain.value = 0.9
-      const comp = ctx.createDynamicsCompressor()
-      this.masterGain.connect(comp)
-      comp.connect(ctx.destination)
-      // Browsers start the context suspended until a user gesture; resume on the
-      // first pointer/key so early ticks aren't silently dropped.
-      const resume = () => {
-        if (this.audioCtx && this.audioCtx.state === 'suspended') this.audioCtx.resume().catch(() => {})
-        if (this.audioResume) {
-          window.removeEventListener('pointerdown', this.audioResume)
-          window.removeEventListener('keydown', this.audioResume)
-          this.audioResume = null
-        }
-      }
-      this.audioResume = resume
-      window.addEventListener('pointerdown', resume)
-      window.addEventListener('keydown', resume)
-    } catch {}
-  }
-
-  private _setMuted(m: boolean) {
-    this.isMuted = m
-  }
-
-  // Rising-pitch tick: pitch climbs with spin progress (a drumroll into the
-  // landing) and the gain swells on the final slow-mo stretch. progress is the
-  // eased spin t in [0,1]; boost lifts the volume for the last dramatic ticks.
-  private playTick(progress = 0, boost = false) {
-    if (this.isMuted || !this.audioCtx || !this.masterGain) return
-    try {
-      const ctx = this.audioCtx
-      const o = ctx.createOscillator()
-      const g = ctx.createGain()
-      o.type = 'square'
-      const clamped = progress < 0 ? 0 : progress > 1 ? 1 : progress
-      o.frequency.value = 660 + clamped * 540 // 660Hz -> 1200Hz across the spin
-      const peak = boost ? 0.05 : 0.03
-      const now = ctx.currentTime
-      // Short percussive envelope (attack + exponential decay on the audio clock)
-      // instead of a hard setTimeout cutoff, which clicked at each tick end.
-      g.gain.setValueAtTime(0.0001, now)
-      g.gain.exponentialRampToValueAtTime(peak, now + 0.005)
-      g.gain.exponentialRampToValueAtTime(0.0001, now + 0.05)
-      o.connect(g)
-      g.connect(this.masterGain)
-      o.start(now)
-      o.stop(now + 0.06)
-    } catch {}
-  }
-
-  private playThunk() {
-    if (this.isMuted || !this.audioCtx || !this.masterGain) return
-    try {
-      const ctx = this.audioCtx
-      const o = ctx.createOscillator()
-      const g = ctx.createGain()
-      o.type = 'sine'
-      o.frequency.value = 140
-      const now = ctx.currentTime
-      g.gain.setValueAtTime(0.0001, now)
-      g.gain.exponentialRampToValueAtTime(0.3, now + 0.01)
-      g.gain.exponentialRampToValueAtTime(0.0001, now + 0.18)
-      o.connect(g)
-      g.connect(this.masterGain)
-      o.start(now)
-      o.stop(now + 0.2)
-    } catch {}
-  }
-
-  // Haptic pulse, gated by the same mute flag as audio. navigator.vibrate is a
-  // no-op on desktop / unsupported, so this is safe to call unconditionally.
-  private vibrate(pattern: number | number[]) {
-    if (this.isMuted) return
-    try {
-      if (typeof navigator !== 'undefined' && (navigator as any).vibrate) (navigator as any).vibrate(pattern)
-    } catch {}
   }
 
   // Pick black or white ink for legibility over a fill via relative luminance.
@@ -637,8 +552,8 @@ export class ThreeWheelRenderer implements WheelRenderer {
       if (id && id !== this.lastTickSegment) {
         this.lastTickSegment = id
         this.onTick(id)
-        this.playTick(t, t > SLOWMO_START)
-        this.vibrate(8) // felt drumroll on mobile; no-op on desktop
+        this.audio?.tick(t, t > SLOWMO_START)
+        this.audio?.vibrate(8) // felt drumroll on mobile; no-op on desktop
       }
 
       if (t < 1) {
@@ -656,8 +571,8 @@ export class ThreeWheelRenderer implements WheelRenderer {
           this.isSpinAnimating = false
           if (this.controls) this.controls.enabled = true
           if (this.bloomPass) this.bloomPass.strength = 0.6 // back to resting glow
-          this.playThunk()
-          this.vibrate([30, 40, 18]) // landing impact in the palm
+          this.audio?.thunk()
+          this.audio?.vibrate([30, 40, 18]) // landing impact in the palm
           this.onTick(null)
           onComplete()
           if (this.onSpinComplete) this.onSpinComplete(winnerId)
@@ -703,6 +618,7 @@ export class ThreeWheelRenderer implements WheelRenderer {
   toggleMute() {
     this.isMuted = !this.isMuted
     try { localStorage.setItem(this.muteKey, this.isMuted ? '1' : '0') } catch {}
+    this.audio?.setMuted(this.isMuted)
   }
 
   private onCanvasClick(_e: MouseEvent) {
@@ -736,12 +652,7 @@ export class ThreeWheelRenderer implements WheelRenderer {
 
   dispose() {
     cancelAnimationFrame(this.animFrameId)
-    if (this.audioResume) {
-      window.removeEventListener('pointerdown', this.audioResume)
-      window.removeEventListener('keydown', this.audioResume)
-      this.audioResume = null
-    }
-    if (this.audioCtx) { this.audioCtx.close().catch(() => {}) }
+    this.audio?.dispose()
     if (this.controls) this.controls.dispose()
     if (this.renderer) {
       this.renderer.domElement.remove()
