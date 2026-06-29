@@ -43,6 +43,7 @@ pub struct AddParticipantsBatchRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateParticipantRequest {
+    pub name: Option<String>,
     pub pinned: Option<bool>,
     pub weight: Option<u32>,
 }

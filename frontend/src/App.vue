@@ -18,6 +18,7 @@ const {
   load,
   addName,
   addNames,
+  addDrafts,
   removeName,
   updateParticipant,
   doSpin,
@@ -485,7 +486,7 @@ const paletteCommands = computed<Command[]>(() => [
       label: `Eliminate ${p.name}`,
       subtitle: `${odds}% to be picked next`,
       hint: 'Remove',
-      disabled: spectatorMode.value,
+      disabled: spectatorMode.value || p.pinned,
       run: () => {
         removeName(p.id)
       },
@@ -607,6 +608,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
               :spectator-mode="spectatorMode"
               @add="addName"
               @add-batch="addNames"
+              @add-drafts="addDrafts"
               @remove="removeName"
               @update-participant="updateParticipant"
               @reset="reset"

@@ -1,5 +1,5 @@
 import { ref, computed } from 'vue'
-import type { Session, Participant, SpinResult } from '../types'
+import type { Session, Participant, SpinResult, ParticipantDraft } from '../types'
 import * as api from '../api/client'
 import { useWebSocket } from './useWebSocket'
 
@@ -270,6 +270,35 @@ export function useSession() {
     }
   }
 
+  async function addDrafts(drafts: ParticipantDraft[]) {
+    if (!session.value || drafts.length === 0) return
+    error.value = null
+    try {
+      const newParticipants = await api.addParticipantsBatch(
+        session.value.id,
+        drafts.map((draft) => draft.name),
+      )
+      for (const p of newParticipants) {
+        const exists = participants.value.some((ep) => ep.id === p.id)
+        if (!exists) {
+          participants.value.push(p)
+        }
+      }
+      for (let index = 0; index < newParticipants.length; index++) {
+        const draft = drafts[index]
+        if (!draft) continue
+        const patch: { pinned?: boolean; weight?: number } = {}
+        if (draft.pinned) patch.pinned = true
+        if (draft.weight && draft.weight !== 1) patch.weight = draft.weight
+        if (Object.keys(patch).length > 0) {
+          await updateParticipant(newParticipants[index].id, patch)
+        }
+      }
+    } catch (e: any) {
+      error.value = e.message
+    }
+  }
+
   async function removeName(participantId: string) {
     if (!session.value) return
     error.value = null
@@ -285,7 +314,7 @@ export function useSession() {
 
   async function updateParticipant(
     participantId: string,
-    patch: { pinned?: boolean; weight?: number },
+    patch: { name?: string; pinned?: boolean; weight?: number },
   ) {
     if (!session.value) return
     error.value = null
@@ -361,6 +390,7 @@ export function useSession() {
     load,
     addName,
     addNames,
+    addDrafts,
     removeName,
     updateParticipant,
     doSpin,

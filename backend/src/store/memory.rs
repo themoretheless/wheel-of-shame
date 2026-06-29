@@ -89,6 +89,7 @@ impl Store for MemoryStore {
         &self,
         session_id: &str,
         participant_id: &str,
+        name: Option<String>,
         pinned: Option<bool>,
         weight: Option<u32>,
     ) -> Result<Participant, AppError> {
@@ -102,6 +103,9 @@ impl Store for MemoryStore {
             .find(|p| p.id == participant_id)
             .ok_or_else(|| AppError::NotFound("Participant not found".into()))?;
 
+        if let Some(name) = name {
+            participant.name = name;
+        }
         if let Some(pinned) = pinned {
             participant.pinned = pinned;
         }

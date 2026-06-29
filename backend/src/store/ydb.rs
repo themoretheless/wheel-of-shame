@@ -324,6 +324,7 @@ impl Store for YdbStore {
         &self,
         session_id: &str,
         participant_id: &str,
+        name: Option<String>,
         pinned: Option<bool>,
         weight: Option<u32>,
     ) -> Result<Participant, AppError> {
@@ -334,6 +335,7 @@ impl Store for YdbStore {
             .retry_transaction(|mut t| {
                 let session_id = session_id.clone();
                 let participant_id = participant_id.clone();
+                let name = name.clone();
                 async move {
                     if !Self::session_exists_in_tx(&mut t, &session_id).await? {
                         return Ok(TxOutcome::SessionNotFound);
@@ -343,6 +345,9 @@ impl Store for YdbStore {
                     else {
                         return Ok(TxOutcome::ParticipantNotFound);
                     };
+                    if let Some(name) = name {
+                        participant.name = name;
+                    }
                     if let Some(pinned) = pinned {
                         participant.pinned = pinned;
                     }
@@ -355,10 +360,12 @@ impl Store for YdbStore {
                             "
                             DECLARE $session_id AS Utf8;
                             DECLARE $id AS Utf8;
+                            DECLARE $name AS Utf8;
                             DECLARE $pinned AS Bool;
                             DECLARE $weight AS Uint32;
                             UPDATE participants
-                            SET pinned = $pinned,
+                            SET name = $name,
+                                pinned = $pinned,
                                 weight = $weight
                             WHERE session_id = $session_id AND id = $id;
                             ",
@@ -366,6 +373,7 @@ impl Store for YdbStore {
                         .with_params(ydb::ydb_params!(
                             "$session_id" => session_id,
                             "$id" => participant_id,
+                            "$name" => participant.name.clone(),
                             "$pinned" => participant.pinned,
                             "$weight" => participant.weight
                         )),

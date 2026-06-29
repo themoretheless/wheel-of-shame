@@ -292,6 +292,7 @@ impl Store for SqliteStore {
         &self,
         session_id: &str,
         participant_id: &str,
+        name: Option<String>,
         pinned: Option<bool>,
         weight: Option<u32>,
     ) -> Result<Participant, AppError> {
@@ -319,6 +320,9 @@ impl Store for SqliteStore {
             return Err(AppError::NotFound("Participant not found".into()));
         };
         let mut participant = row_to_participant(&row);
+        if let Some(name) = name {
+            participant.name = name;
+        }
         if let Some(pinned) = pinned {
             participant.pinned = pinned;
         }
@@ -328,9 +332,10 @@ impl Store for SqliteStore {
 
         sqlx::query(
             "UPDATE participants
-             SET pinned = ?, weight = ?
+             SET name = ?, pinned = ?, weight = ?
              WHERE session_id = ? AND id = ?",
         )
+        .bind(&participant.name)
         .bind(participant.pinned)
         .bind(participant.weight as i64)
         .bind(session_id)

@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from 'vue'
-import type { Participant } from '../types'
+import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
+import type { Participant, ParticipantDraft } from '../types'
 import { identityColor } from '../utils/identity'
 
 // First visible character, upper-cased, for the round identity token.
@@ -20,8 +20,9 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'add', name: string): void
   (e: 'add-batch', names: string[]): void
+  (e: 'add-drafts', drafts: ParticipantDraft[]): void
   (e: 'remove', id: string): void
-  (e: 'update-participant', id: string, patch: { pinned?: boolean; weight?: number }): void
+  (e: 'update-participant', id: string, patch: { name?: string; pinned?: boolean; weight?: number }): void
   (e: 'reset'): void
   (e: 'update:sound-enabled', value: boolean): void
   (e: 'update:sound-intensity', value: number): void
@@ -38,7 +39,12 @@ const viewMode = ref<'all' | 'active' | 'picked'>('all')
 const sortMode = ref<'added' | 'name'>('added')
 const compactRows = ref(false)
 const historyReplay = ref<{ name: string; order: number | string } | null>(null)
-const undoAction = ref<{ label: string; names: string[]; replaceActive: boolean } | null>(null)
+type UndoAction =
+  | { label: string; names: string[]; replaceActive: boolean }
+  | { label: string; renames: { id: string; name: string }[] }
+const undoAction = ref<UndoAction | null>(null)
+const editingId = ref<string | null>(null)
+const editingName = ref('')
 let copyStatusTimer: ReturnType<typeof setTimeout> | undefined
 
 function parseNames(value: string): string[] {
@@ -73,14 +79,88 @@ function addName() {
   if (names.length > 0) nameInput.value = ''
 }
 
-const parsedBulkNames = computed(() => uniqueInOrder(parseNames(bulkText.value)))
-const rawBulkNames = computed(() => parseNames(bulkText.value))
-const bulkDuplicateCount = computed(() => rawBulkNames.value.length - parsedBulkNames.value.length)
-const bulkPreviewNames = computed(() => parsedBulkNames.value.slice(0, 8))
+function clampWeight(value: number): number {
+  return Math.max(1, Math.min(5, value))
+}
+
+function parseWeight(value: string | undefined): number | null {
+  if (!value) return null
+  const parsed = Number(value.trim())
+  if (!Number.isFinite(parsed)) return null
+  return clampWeight(Math.round(parsed))
+}
+
+function parsePinned(value: string | undefined): boolean | null {
+  if (!value) return null
+  const normalized = value.trim().toLocaleLowerCase()
+  if (['pin', 'pinned', 'true', 'yes', 'y', '1', 'lock', 'locked'].includes(normalized)) return true
+  if (['false', 'no', 'n', '0', 'off', 'unpin'].includes(normalized)) return false
+  return null
+}
+
+function uniqueDraftsInOrder(drafts: ParticipantDraft[]): ParticipantDraft[] {
+  const seen = new Set<string>()
+  return drafts.filter((draft) => {
+    const key = draft.name.toLocaleLowerCase()
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function parseBulkDrafts(value: string): ParticipantDraft[] {
+  const drafts: ParticipantDraft[] = []
+  for (const rawLine of value.split(/\n+/)) {
+    const line = rawLine.trim()
+    if (!line) continue
+    const fields = line
+      .split(/[,;\t]+/)
+      .map((field) => field.trim())
+      .filter(Boolean)
+    if (fields.length === 0) continue
+    if (
+      fields[0]?.toLocaleLowerCase() === 'name' &&
+      fields.some((field) => ['weight', 'pinned', 'pin'].includes(field.toLocaleLowerCase()))
+    ) {
+      continue
+    }
+
+    const structured =
+      fields.length > 1 && (parseWeight(fields[1]) !== null || parsePinned(fields[1]) !== null || parsePinned(fields[2]) !== null)
+
+    if (!structured) {
+      for (const name of fields) drafts.push({ name })
+      continue
+    }
+
+    const pinnedFromSecond = parsePinned(fields[1])
+    const weight = parseWeight(fields[1])
+    const pinned = parsePinned(fields[2]) ?? pinnedFromSecond ?? undefined
+    drafts.push({
+      name: fields[0],
+      ...(weight ? { weight } : {}),
+      ...(pinned !== undefined ? { pinned } : {}),
+    })
+  }
+  return drafts
+}
+
+const rawBulkDrafts = computed(() => parseBulkDrafts(bulkText.value))
+const parsedBulkDrafts = computed(() => uniqueDraftsInOrder(rawBulkDrafts.value))
+const bulkDuplicateCount = computed(() => rawBulkDrafts.value.length - parsedBulkDrafts.value.length)
+const bulkPreviewDrafts = computed(() => parsedBulkDrafts.value.slice(0, 8))
+const bulkConfiguredCount = computed(() =>
+  parsedBulkDrafts.value.filter((draft) => draft.pinned || (draft.weight ?? 1) !== 1).length,
+)
 
 function importBulk() {
-  submitNames(parsedBulkNames.value)
-  if (parsedBulkNames.value.length > 0) {
+  if (parsedBulkDrafts.value.length === 0) return
+  if (bulkConfiguredCount.value > 0) {
+    emit('add-drafts', parsedBulkDrafts.value)
+  } else {
+    submitNames(parsedBulkDrafts.value.map((draft) => draft.name))
+  }
+  if (parsedBulkDrafts.value.length > 0) {
     bulkText.value = ''
     bulkOpen.value = false
   }
@@ -98,7 +178,6 @@ const normalizedActiveNames = computed(() =>
 )
 
 const canNormalizeActive = computed(() =>
-  !props.active.some((participant) => participant.pinned) &&
   props.active.some((participant, index) => participant.name !== normalizedActiveNames.value[index]),
 )
 
@@ -106,13 +185,14 @@ function normalizeActiveNames() {
   if (props.spectatorMode || !canNormalizeActive.value) return
   undoAction.value = {
     label: 'Undo normalize',
-    names: props.active.map((participant) => participant.name),
-    replaceActive: true,
+    renames: props.active.map((participant) => ({ id: participant.id, name: participant.name })),
   }
-  for (const participant of props.active) {
-    emit('remove', participant.id)
+  for (const [index, participant] of props.active.entries()) {
+    const name = normalizedActiveNames.value[index]
+    if (name && name !== participant.name) {
+      emit('update-participant', participant.id, { name })
+    }
   }
-  submitNames(uniqueInOrder(normalizedActiveNames.value))
 }
 
 const totalCount = computed(() => props.active.length + props.removed.length)
@@ -225,6 +305,13 @@ function removeActiveDuplicates() {
 function runUndoAction() {
   const action = undoAction.value
   if (props.spectatorMode || !action) return
+  if ('renames' in action) {
+    for (const rename of action.renames) {
+      emit('update-participant', rename.id, { name: rename.name })
+    }
+    undoAction.value = null
+    return
+  }
   if (action.replaceActive) {
     for (const participant of props.active) {
       emit('remove', participant.id)
@@ -242,6 +329,30 @@ function togglePin(participant: Participant) {
 function setWeight(participant: Participant, value: number) {
   if (props.spectatorMode) return
   emit('update-participant', participant.id, { weight: Math.max(1, Math.min(5, value)) })
+}
+
+function startRename(participant: Participant) {
+  if (props.spectatorMode || participant.pending) return
+  editingId.value = participant.id
+  editingName.value = participant.name
+  void nextTick(() => {
+    const input = document.querySelector<HTMLInputElement>('.rename-input')
+    input?.focus()
+    input?.select()
+  })
+}
+
+function cancelRename() {
+  editingId.value = null
+  editingName.value = ''
+}
+
+function saveRename(participant: Participant) {
+  if (editingId.value !== participant.id) return
+  const name = editingName.value.trim()
+  cancelRename()
+  if (!name || name === participant.name) return
+  emit('update-participant', participant.id, { name })
 }
 
 function copyReport() {
@@ -453,22 +564,26 @@ onBeforeUnmount(() => {
     <div v-if="bulkOpen" class="bulk-editor">
       <textarea
         v-model="bulkText"
-        placeholder="Paste one name per line, or separate with commas"
+        placeholder="Paste names, or rows like Alice, 3, pinned"
         rows="4"
         :disabled="spectatorMode"
       ></textarea>
       <div class="bulk-footer">
-        <span>{{ parsedBulkNames.length }} ready<span v-if="bulkDuplicateCount > 0">, {{ bulkDuplicateCount }} duplicate</span></span>
+        <span>
+          {{ parsedBulkDrafts.length }} ready<span v-if="bulkConfiguredCount > 0">, {{ bulkConfiguredCount }} configured</span><span v-if="bulkDuplicateCount > 0">, {{ bulkDuplicateCount }} duplicate</span>
+        </span>
         <button
           class="btn btn-add btn-compact"
-          :disabled="spectatorMode || parsedBulkNames.length === 0"
+          :disabled="spectatorMode || parsedBulkDrafts.length === 0"
           @click="importBulk"
         >
           Import
         </button>
       </div>
-      <div v-if="bulkPreviewNames.length > 0" class="bulk-preview">
-        <span v-for="name in bulkPreviewNames" :key="name">{{ name }}</span>
+      <div v-if="bulkPreviewDrafts.length > 0" class="bulk-preview">
+        <span v-for="draft in bulkPreviewDrafts" :key="draft.name">
+          {{ draft.name }}<template v-if="draft.weight && draft.weight > 1"> x{{ draft.weight }}</template><template v-if="draft.pinned"> pinned</template>
+        </span>
       </div>
     </div>
 
@@ -528,7 +643,24 @@ onBeforeUnmount(() => {
             <span class="identity-token" :style="{ background: identityColor(p.name) }">{{
               initialOf(p.name)
             }}</span>
-            <span class="name-text">{{ p.name }}</span>
+            <input
+              v-if="editingId === p.id"
+              v-model="editingName"
+              class="rename-input"
+              :aria-label="`Rename ${p.name}`"
+              @blur="saveRename(p)"
+              @keyup.enter="saveRename(p)"
+              @keyup.esc="cancelRename"
+            />
+            <button
+              v-else
+              class="name-text name-button"
+              :title="spectatorMode ? p.name : `Rename ${p.name}`"
+              :disabled="spectatorMode || p.pending"
+              @click="startRename(p)"
+            >
+              {{ p.name }}
+            </button>
           </span>
           <span class="row-tools">
             <button
@@ -859,6 +991,7 @@ h2 {
 }
 
 .name-input,
+.rename-input,
 .search-input,
 .bulk-editor textarea {
   width: 100%;
@@ -877,6 +1010,7 @@ h2 {
 }
 
 .name-input:focus,
+.rename-input:focus,
 .search-input:focus,
 .bulk-editor textarea:focus {
   border-color: var(--accent);
@@ -1133,6 +1267,32 @@ ol {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.name-button {
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.name-button:hover:not(:disabled) {
+  color: var(--accent-text);
+}
+
+.name-button:disabled {
+  cursor: default;
+}
+
+.rename-input {
+  min-width: 0;
+  height: 28px;
+  padding: 4px 7px;
+  font-size: 13px;
 }
 
 /* Round identity token: deterministic per-name color matching the wheel

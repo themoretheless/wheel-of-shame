@@ -59,7 +59,7 @@ export function deleteParticipant(sessionId: string, participantId: string): Pro
 export function updateParticipant(
   sessionId: string,
   participantId: string,
-  patch: { pinned?: boolean; weight?: number },
+  patch: { name?: string; pinned?: boolean; weight?: number },
 ): Promise<Participant> {
   return request(`/api/v1/sessions/${sessionId}/participants/${participantId}`, {
     method: 'PATCH',

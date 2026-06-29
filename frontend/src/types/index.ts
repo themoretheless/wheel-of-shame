@@ -20,6 +20,12 @@ export interface Participant {
   error?: boolean
 }
 
+export interface ParticipantDraft {
+  name: string
+  pinned?: boolean
+  weight?: number
+}
+
 export interface SpinResult {
   picked: Participant
   remaining: number

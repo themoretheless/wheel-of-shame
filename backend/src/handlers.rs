@@ -177,7 +177,23 @@ pub async fn update_participant(
     Path((session_id, participant_id)): Path<(String, String)>,
     Json(req): Json<UpdateParticipantRequest>,
 ) -> Result<Json<Participant>, AppError> {
-    if req.pinned.is_none() && req.weight.is_none() {
+    let name = match req.name {
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Err(AppError::BadRequest("Name cannot be empty".into()));
+            }
+            if trimmed.chars().count() > MAX_NAME_LEN {
+                return Err(AppError::BadRequest(format!(
+                    "Name must be at most {MAX_NAME_LEN} characters"
+                )));
+            }
+            Some(trimmed.to_string())
+        }
+        None => None,
+    };
+
+    if name.is_none() && req.pinned.is_none() && req.weight.is_none() {
         return Err(AppError::BadRequest(
             "At least one participant setting is required".into(),
         ));
@@ -192,7 +208,7 @@ pub async fn update_participant(
 
     let participant = state
         .store
-        .update_participant(&session_id, &participant_id, req.pinned, req.weight)
+        .update_participant(&session_id, &participant_id, name, req.pinned, req.weight)
         .await?;
 
     state

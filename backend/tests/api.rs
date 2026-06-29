@@ -348,14 +348,16 @@ async fn update_participant_settings() {
         &app,
         "PATCH",
         &format!("/api/v1/sessions/{id}/participants/{pid}"),
-        Some(json!({ "pinned": true, "weight": 4 })),
+        Some(json!({ "name": "  Ada  ", "pinned": true, "weight": 4 })),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["name"], "Ada");
     assert_eq!(body["pinned"], true);
     assert_eq!(body["weight"], 4);
 
     let parts = get_participants(&app, &id).await;
+    assert_eq!(parts[0]["name"], "Ada");
     assert_eq!(parts[0]["pinned"], true);
     assert_eq!(parts[0]["weight"], 4);
 
@@ -374,6 +376,16 @@ async fn update_participant_settings() {
         "PATCH",
         &format!("/api/v1/sessions/{id}/participants/{pid}"),
         Some(json!({ "weight": 6 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].is_string());
+
+    let (status, body) = send(
+        &app,
+        "PATCH",
+        &format!("/api/v1/sessions/{id}/participants/{pid}"),
+        Some(json!({ "name": " " })),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);

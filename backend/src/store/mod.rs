@@ -56,6 +56,7 @@ pub trait Store: Send + Sync {
         &self,
         session_id: &str,
         participant_id: &str,
+        name: Option<String>,
         pinned: Option<bool>,
         weight: Option<u32>,
     ) -> Result<Participant, AppError>;
