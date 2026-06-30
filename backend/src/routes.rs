@@ -34,7 +34,13 @@ pub fn create_router(state: AppState) -> Router {
             patch(handlers::update_participant_props),
         )
         .route("/api/v1/sessions/{id}/actions", get(handlers::list_actions))
-        .route("/api/v1/sessions/{id}/snapshot", get(handlers::get_snapshot))
-        .route("/api/v1/sessions/{id}/restore", post(handlers::restore_from_snapshot))
+        .route(
+            "/api/v1/sessions/{id}/snapshot",
+            get(handlers::get_snapshot),
+        )
+        .route(
+            "/api/v1/sessions/{id}/restore",
+            post(handlers::restore_from_snapshot),
+        )
         .with_state(state)
 }

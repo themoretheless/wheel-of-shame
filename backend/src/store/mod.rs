@@ -81,7 +81,11 @@ pub trait Store: Send + Sync {
 
     async fn create_snapshot(&self, snapshot: &Snapshot) -> Result<(), AppError>;
     /// Returns the snapshot at or immediately before the given action (or latest if None).
-    async fn get_snapshot(&self, session_id: &str, before_action_id: Option<&str>) -> Result<Option<Snapshot>, AppError>;
+    async fn get_snapshot(
+        &self,
+        session_id: &str,
+        before_action_id: Option<&str>,
+    ) -> Result<Option<Snapshot>, AppError>;
 
     /// Replace the entire participant list for a session (used by snapshot restore for undo).
     /// Returns the new list. Does not append action (caller does).

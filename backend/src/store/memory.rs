@@ -155,7 +155,9 @@ impl Store for MemoryStore {
         let spin_action = Action {
             id: uuid::Uuid::new_v4().to_string(),
             session_id: session_id.to_string(),
-            kind: crate::models::ActionKind::Spin { picked_id: picked.id.clone() },
+            kind: crate::models::ActionKind::Spin {
+                picked_id: picked.id.clone(),
+            },
             timestamp: chrono::Utc::now(),
             actor: None,
         };
@@ -168,7 +170,7 @@ impl Store for MemoryStore {
             action_id: spin_action.id,
             participants: parts.clone(),
         };
-        let _ = self.create_snapshot(&snap).await;  // in real would use before snapshot
+        let _ = self.create_snapshot(&snap).await; // in real would use before snapshot
 
         drop(participants);
 
@@ -206,7 +208,7 @@ impl Store for MemoryStore {
             .find(|p| p.id == participant_id)
             .ok_or_else(|| AppError::NotFound("Participant not found".into()))?;
         if let Some(w) = weight {
-            p.weight = Some(w);
+            p.weight = Some(w.clamp(0.1, 10.0));
         }
         if let Some(v) = visual {
             p.visual = Some(v);
@@ -240,12 +242,16 @@ impl Store for MemoryStore {
         Ok(())
     }
 
-    async fn get_snapshot(&self, session_id: &str, before_action_id: Option<&str>) -> Result<Option<Snapshot>, AppError> {
+    async fn get_snapshot(
+        &self,
+        session_id: &str,
+        before_action_id: Option<&str>,
+    ) -> Result<Option<Snapshot>, AppError> {
         let snaps = self.snapshots.read().await;
         let list = snaps.get(session_id).cloned().unwrap_or_default();
         if let Some(before) = before_action_id {
             // find latest with action_id <= before (assume lexical or id order for simplicity)
-            Ok(list.into_iter().filter(|s| s.action_id.as_str() <= before).last())
+            Ok(list.into_iter().rfind(|s| s.action_id.as_str() <= before))
         } else {
             Ok(list.into_iter().next_back())
         }
