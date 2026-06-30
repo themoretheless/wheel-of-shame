@@ -15,5 +15,7 @@ CREATE TABLE participants (
     removed     Bool NOT NULL,
     removed_at  Timestamp,
     spin_order  Uint32,
+    pinned      Bool NOT NULL,
+    weight      Uint32 NOT NULL,
     PRIMARY KEY (session_id, id)
 );

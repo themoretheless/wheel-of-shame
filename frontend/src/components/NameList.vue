@@ -1,631 +1,1265 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
-import type { Participant } from '../types'
+import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
+import type { Participant, ParticipantDraft } from '../types'
 import { identityColor } from '../utils/identity'
-import { parsePastedNames } from '../utils/roster'
-import { computeAngles } from '../utils/wheel'
 
 // First visible character, upper-cased, for the round identity token.
 function initialOf(name: string): string {
   return (name.trim()[0] ?? '?').toUpperCase()
 }
 
-// The first three names off the wheel earn a medal tier (gold/silver/bronze);
-// in a wheel of shame, going out earliest is the standout fate. `order` is the
-// 1-based spin_order, so rank 1 is the very first elimination.
-const MEDAL_TIERS: Record<number, string> = {
-  1: 'gold',
-  2: 'silver',
-  3: 'bronze',
-}
-
-function medalTier(order: number | undefined): string | null {
-  return order != null ? (MEDAL_TIERS[order] ?? null) : null
-}
-
 const props = defineProps<{
   active: Participant[]
   removed: Participant[]
-  // Id of the participant whose wheel segment is under the pointer mid-spin; the
-  // matching row gets a transient '.ticking' flash so the roster reads the spin.
-  tickingId?: string | null
-  comments?: Record<string, string[]>
-  lastPickedId?: string | null
-  preventRepeat?: boolean
-  // From roster/engine (perf): precomputed with angles to avoid duplicate work
-  preparedSegments?: Array<{ id: string; angle: number; weight: number }>
+  soundEnabled: boolean
+  soundIntensity: number
+  themePreset: 'classic' | 'arcade' | 'minimal'
+  spectatorMode: boolean
 }>()
-
-// Per-participant odds using shared wheel util or prepared data (from roster/worker).
-const oddsById = computed(() => {
-  const map: Record<string, number> = {}
-  if (!props.active.length) return map
-
-  let angles: number[]
-  if (props.preparedSegments && props.preparedSegments.length === props.active.length) {
-    // Use precomputed from store/worker (avoids duplicate computeAngles)
-    angles = props.preparedSegments.map(s => s.angle)
-  } else {
-    angles = computeAngles(props.active)
-  }
-
-  const total = angles.reduce((a, b) => a + b, 0) || (Math.PI * 2)
-  props.active.forEach((p, i) => {
-    map[p.id] = ((angles[i] || 0) / total) * 100
-  })
-  return map
-})
-function getOdds(p: Participant) {
-  return oddsById.value[p.id] ?? (100 / props.active.length)
-}
-
-// Note: individual odds now from getOdds(p) using wheel util (weight aware).
-
-// Last one standing: once at least one name has been picked and a single active
-// row remains, that row is crowned the survivor (a gold-trimmed counterpart to
-// the picked-list medals).
-const survivorReached = computed(
-  () => props.active.length === 1 && props.removed.length > 0,
-)
 
 const emit = defineEmits<{
   (e: 'add', name: string): void
   (e: 'add-batch', names: string[]): void
+  (e: 'add-drafts', drafts: ParticipantDraft[]): void
   (e: 'remove', id: string): void
+  (e: 'update-participant', id: string, patch: { name?: string; pinned?: boolean; weight?: number }): void
   (e: 'reset'): void
-  // Id of the active row the cursor is over (null on leave), so the wheel can
-  // lift the matching segment as a hover peek.
-  (e: 'hover-name', id: string | null): void
-  (e: 'reorder', from: number, to: number): void
+  (e: 'update:sound-enabled', value: boolean): void
+  (e: 'update:sound-intensity', value: number): void
+  (e: 'update:theme-preset', value: 'classic' | 'arcade' | 'minimal'): void
+  (e: 'update:spectator-mode', value: boolean): void
 }>()
 
 const nameInput = ref('')
-const searchTerm = ref('')
+const searchQuery = ref('')
+const bulkOpen = ref(false)
+const bulkText = ref('')
+const copyStatus = ref('')
+const viewMode = ref<'all' | 'active' | 'picked'>('all')
+const sortMode = ref<'added' | 'name'>('added')
+const compactRows = ref(false)
+const historyReplay = ref<{ name: string; order: number | string } | null>(null)
+type UndoAction =
+  | { label: string; names: string[]; replaceActive: boolean }
+  | { label: string; renames: { id: string; name: string }[] }
+const undoAction = ref<UndoAction | null>(null)
+const editingId = ref<string | null>(null)
+const editingName = ref('')
+let copyStatusTimer: ReturnType<typeof setTimeout> | undefined
 
-const filteredActive = computed(() => {
-  if (!searchTerm.value) return props.active
-  const term = searchTerm.value.toLowerCase()
-  return props.active.filter(p => p.name.toLowerCase().includes(term))
-})
-
-// Simple virtualization for large N (perf fix): fixed row height estimate,
-// window the list inside a scroll viewport. TransitionGroup still used on the
-// window slice (eject anims for off-window rows are skipped, acceptable trade).
-const ROW_H = 34
-const OVERSCAN = 4
-const scrollTop = ref(0)
-const viewportH = ref(320)
-const listContainer = ref<HTMLDivElement | null>(null)
-
-const virtualSlice = computed(() => {
-  const list = filteredActive.value
-  if (list.length <= 12) return { start: 0, end: list.length, list, padTop: 0, padBot: 0 }
-  const start = Math.max(0, Math.floor(scrollTop.value / ROW_H) - OVERSCAN)
-  const visibleCount = Math.ceil(viewportH.value / ROW_H) + OVERSCAN * 2
-  const end = Math.min(list.length, start + visibleCount)
-  return {
-    start,
-    end,
-    list: list.slice(start, end),
-    padTop: start * ROW_H,
-    padBot: (list.length - end) * ROW_H,
-  }
-})
-
-function onListScroll(e: Event) {
-  scrollTop.value = (e.target as HTMLDivElement).scrollTop
-}
-
-function updateViewport() {
-  if (listContainer.value) {
-    viewportH.value = listContainer.value.clientHeight || 320
-  }
-}
-
-onMounted(() => {
-  updateViewport()
-  window.addEventListener('resize', updateViewport)
-})
-onBeforeUnmount(() => {
-  window.removeEventListener('resize', updateViewport)
-})
-
-// Template ref on the name field so App.vue can route a global "/" or "n"
-// quick-capture keystroke straight into it without the user reaching for the
-// mouse. Exposed via focusInput() below.
-const nameInputEl = ref<HTMLInputElement | null>(null)
-
-function focusInput() {
-  nameInputEl.value?.focus()
-}
-
-defineExpose({ focusInput })
-
-// Staged result of a multi-name paste, awaiting an explicit confirm so a big
-// roster lands in one reviewed batch rather than silently flooding the input.
-const pendingPaste = ref<string[] | null>(null)
-
-// Intercept a paste that carries more than one name (newline/comma/tab
-// separated) and stage it for confirmation instead of dumping raw text into the
-// field. A single pasted name falls through to the browser's default paste so
-// typing-then-Enter still works.
-function onPaste(event: ClipboardEvent) {
-  const text = event.clipboardData?.getData('text') ?? ''
-  if (!/[\n,\t]/.test(text)) return
-  const names = parsePastedNames(text, props.active.map((p) => p.name))
-  event.preventDefault()
-  pendingPaste.value = names.length > 0 ? names : null
-}
-
-function confirmPaste() {
-  if (pendingPaste.value && pendingPaste.value.length > 0) {
-    emit('add-batch', pendingPaste.value)
-  }
-  pendingPaste.value = null
-  nameInput.value = ''
-}
-
-let dragIndex: number | null = null
-
-function onDragStart(index: number, ev: DragEvent) {
-  dragIndex = index
-  if (ev.dataTransfer) ev.dataTransfer.effectAllowed = 'move'
-}
-
-function onDrop(index: number, _ev: DragEvent) {
-  if (dragIndex !== null && dragIndex !== index) {
-    emit('reorder', dragIndex, index)
-  }
-  dragIndex = null
-}
-
-function cancelPaste() {
-  pendingPaste.value = null
-}
-
-// Roster filter: rows that don't match stay in the DOM (so the odds bars keep
-// splitting evenly across every active name) but get a '.dimmed' class. Empty
-// query matches everything.
-const filterQuery = ref('')
-
-const matchesFilter = computed(() => {
-  const q = filterQuery.value.trim().toLowerCase()
-  return (p: Participant): boolean =>
-    q.length === 0 || p.name.toLowerCase().includes(q)
-})
-
-// Count of active rows surfaced by the current filter, for the empty-result hint.
-const filterMatchCount = computed(() => {
-  const match = matchesFilter.value
-  return props.active.reduce((n, p) => (match(p) ? n + 1 : n), 0)
-})
-
-// A ready-made roster offered on the empty state so a first-time session can be
-// populated in one click; routed through the same add-batch path as typed input.
-const SAMPLE_NAMES = ['Ada', 'Alan', 'Grace', 'Linus', 'Margaret', 'Dennis']
-
-function addSampleNames() {
-  emit('add-batch', SAMPLE_NAMES)
-}
-
-function addName() {
-  const value = nameInput.value.trim()
-  if (!value) return
-
-  // Support comma-separated input
-  const names = value
-    .split(',')
+function parseNames(value: string): string[] {
+  return value
+    .split(/[\n,;\t]+/)
     .map((n) => n.trim())
     .filter((n) => n.length > 0)
+}
 
+function uniqueInOrder(names: string[]): string[] {
+  const seen = new Set<string>()
+  return names.filter((name) => {
+    const key = name.toLocaleLowerCase()
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function submitNames(names: string[]) {
+  if (names.length === 0) return
   if (names.length > 1) {
     emit('add-batch', names)
   } else {
     emit('add', names[0])
   }
-  nameInput.value = ''
 }
+
+function addName() {
+  const names = uniqueInOrder(parseNames(nameInput.value))
+  submitNames(names)
+  if (names.length > 0) nameInput.value = ''
+}
+
+function clampWeight(value: number): number {
+  return Math.max(1, Math.min(5, value))
+}
+
+function parseWeight(value: string | undefined): number | null {
+  if (!value) return null
+  const parsed = Number(value.trim())
+  if (!Number.isFinite(parsed)) return null
+  return clampWeight(Math.round(parsed))
+}
+
+function parsePinned(value: string | undefined): boolean | null {
+  if (!value) return null
+  const normalized = value.trim().toLocaleLowerCase()
+  if (['pin', 'pinned', 'true', 'yes', 'y', '1', 'lock', 'locked'].includes(normalized)) return true
+  if (['false', 'no', 'n', '0', 'off', 'unpin'].includes(normalized)) return false
+  return null
+}
+
+function uniqueDraftsInOrder(drafts: ParticipantDraft[]): ParticipantDraft[] {
+  const seen = new Set<string>()
+  return drafts.filter((draft) => {
+    const key = draft.name.toLocaleLowerCase()
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function parseBulkDrafts(value: string): ParticipantDraft[] {
+  const drafts: ParticipantDraft[] = []
+  for (const rawLine of value.split(/\n+/)) {
+    const line = rawLine.trim()
+    if (!line) continue
+    const fields = line
+      .split(/[,;\t]+/)
+      .map((field) => field.trim())
+      .filter(Boolean)
+    if (fields.length === 0) continue
+    if (
+      fields[0]?.toLocaleLowerCase() === 'name' &&
+      fields.some((field) => ['weight', 'pinned', 'pin'].includes(field.toLocaleLowerCase()))
+    ) {
+      continue
+    }
+
+    const structured =
+      fields.length > 1 && (parseWeight(fields[1]) !== null || parsePinned(fields[1]) !== null || parsePinned(fields[2]) !== null)
+
+    if (!structured) {
+      for (const name of fields) drafts.push({ name })
+      continue
+    }
+
+    const pinnedFromSecond = parsePinned(fields[1])
+    const weight = parseWeight(fields[1])
+    const pinned = parsePinned(fields[2]) ?? pinnedFromSecond ?? undefined
+    drafts.push({
+      name: fields[0],
+      ...(weight ? { weight } : {}),
+      ...(pinned !== undefined ? { pinned } : {}),
+    })
+  }
+  return drafts
+}
+
+const rawBulkDrafts = computed(() => parseBulkDrafts(bulkText.value))
+const parsedBulkDrafts = computed(() => uniqueDraftsInOrder(rawBulkDrafts.value))
+const bulkDuplicateCount = computed(() => rawBulkDrafts.value.length - parsedBulkDrafts.value.length)
+const bulkPreviewDrafts = computed(() => parsedBulkDrafts.value.slice(0, 8))
+const bulkConfiguredCount = computed(() =>
+  parsedBulkDrafts.value.filter((draft) => draft.pinned || (draft.weight ?? 1) !== 1).length,
+)
+
+function importBulk() {
+  if (parsedBulkDrafts.value.length === 0) return
+  if (bulkConfiguredCount.value > 0) {
+    emit('add-drafts', parsedBulkDrafts.value)
+  } else {
+    submitNames(parsedBulkDrafts.value.map((draft) => draft.name))
+  }
+  if (parsedBulkDrafts.value.length > 0) {
+    bulkText.value = ''
+    bulkOpen.value = false
+  }
+}
+
+function titleCaseName(name: string): string {
+  return name
+    .trim()
+    .toLocaleLowerCase()
+    .replace(/\b\p{L}/gu, (letter) => letter.toLocaleUpperCase())
+}
+
+const normalizedActiveNames = computed(() =>
+  props.active.map((participant) => titleCaseName(participant.name)),
+)
+
+const canNormalizeActive = computed(() =>
+  props.active.some((participant, index) => participant.name !== normalizedActiveNames.value[index]),
+)
+
+function normalizeActiveNames() {
+  if (props.spectatorMode || !canNormalizeActive.value) return
+  undoAction.value = {
+    label: 'Undo normalize',
+    renames: props.active.map((participant) => ({ id: participant.id, name: participant.name })),
+  }
+  for (const [index, participant] of props.active.entries()) {
+    const name = normalizedActiveNames.value[index]
+    if (name && name !== participant.name) {
+      emit('update-participant', participant.id, { name })
+    }
+  }
+}
+
+const totalCount = computed(() => props.active.length + props.removed.length)
+function weightOf(participant: Participant): number {
+  return participant.weight ?? 1
+}
+
+const totalWeight = computed(() =>
+  props.active.reduce((sum, participant) => sum + weightOf(participant), 0),
+)
+const pinnedCount = computed(() => props.active.filter((participant) => participant.pinned).length)
+
+const nextOdds = computed(() => {
+  if (props.active.length === 0) return '0%'
+  if (props.active.some((participant) => weightOf(participant) !== 1)) {
+    return `${totalWeight.value} tickets`
+  }
+  const odds = 100 / props.active.length
+  return `${odds >= 10 ? Math.round(odds) : odds.toFixed(1)}%`
+})
+
+const nextOddsLabel = computed(() =>
+  props.active.some((participant) => weightOf(participant) !== 1) ? 'weighted pool' : 'next odds',
+)
+
+function participantMatches(p: Participant): boolean {
+  const q = searchQuery.value.trim().toLocaleLowerCase()
+  if (!q) return true
+  return p.name.toLocaleLowerCase().includes(q)
+}
+
+function sortParticipants(list: Participant[], picked: boolean): Participant[] {
+  const sorted = [...list]
+  const pinnedSort = (a: Participant, b: Participant) => Number(b.pinned) - Number(a.pinned)
+  if (sortMode.value === 'name') {
+    return sorted.sort(
+      (a, b) =>
+        (picked ? 0 : pinnedSort(a, b)) ||
+        a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }),
+    )
+  }
+  if (picked) {
+    return sorted.sort((a, b) => (a.spin_order ?? 0) - (b.spin_order ?? 0))
+  }
+  return sorted.sort(pinnedSort)
+}
+
+const activeFiltered = computed(() =>
+  sortParticipants(props.active.filter(participantMatches), false),
+)
+const removedFiltered = computed(() =>
+  sortParticipants(props.removed.filter(participantMatches), true),
+)
+const showActiveSection = computed(() => viewMode.value !== 'picked')
+const showPickedSection = computed(() => viewMode.value !== 'active')
+const visibleCount = computed(() => {
+  if (viewMode.value === 'active') return activeFiltered.value.length
+  if (viewMode.value === 'picked') return removedFiltered.value.length
+  return activeFiltered.value.length + removedFiltered.value.length
+})
+
+const duplicateNames = computed(() => {
+  const counts = new Map<string, { name: string; count: number }>()
+  for (const participant of [...props.active, ...props.removed]) {
+    const key = participant.name.trim().toLocaleLowerCase()
+    if (!key) continue
+    const entry = counts.get(key)
+    if (entry) {
+      entry.count++
+    } else {
+      counts.set(key, { name: participant.name.trim(), count: 1 })
+    }
+  }
+  return [...counts.values()].filter((entry) => entry.count > 1)
+})
+
+const activeDuplicateIds = computed(() => {
+  const seen = new Set<string>()
+  const duplicateIds: string[] = []
+  for (const participant of props.active) {
+    const key = participant.name.trim().toLocaleLowerCase()
+    if (!key) continue
+    if (seen.has(key)) {
+      if (!participant.pinned) duplicateIds.push(participant.id)
+    } else {
+      seen.add(key)
+    }
+  }
+  return duplicateIds
+})
+
+const activeDuplicateNames = computed(() =>
+  props.active
+    .filter((participant) => activeDuplicateIds.value.includes(participant.id))
+    .map((participant) => participant.name),
+)
+
+function removeActiveDuplicates() {
+  if (props.spectatorMode || activeDuplicateIds.value.length === 0) return
+  undoAction.value = {
+    label: 'Undo cleanup',
+    names: activeDuplicateNames.value,
+    replaceActive: false,
+  }
+  for (const id of activeDuplicateIds.value) {
+    emit('remove', id)
+  }
+}
+
+function runUndoAction() {
+  const action = undoAction.value
+  if (props.spectatorMode || !action) return
+  if ('renames' in action) {
+    for (const rename of action.renames) {
+      emit('update-participant', rename.id, { name: rename.name })
+    }
+    undoAction.value = null
+    return
+  }
+  if (action.replaceActive) {
+    for (const participant of props.active) {
+      emit('remove', participant.id)
+    }
+  }
+  submitNames(action.names)
+  undoAction.value = null
+}
+
+function togglePin(participant: Participant) {
+  if (props.spectatorMode) return
+  emit('update-participant', participant.id, { pinned: !participant.pinned })
+}
+
+function setWeight(participant: Participant, value: number) {
+  if (props.spectatorMode) return
+  emit('update-participant', participant.id, { weight: Math.max(1, Math.min(5, value)) })
+}
+
+function startRename(participant: Participant) {
+  if (props.spectatorMode || participant.pending) return
+  editingId.value = participant.id
+  editingName.value = participant.name
+  void nextTick(() => {
+    const input = document.querySelector<HTMLInputElement>('.rename-input')
+    input?.focus()
+    input?.select()
+  })
+}
+
+function cancelRename() {
+  editingId.value = null
+  editingName.value = ''
+}
+
+function saveRename(participant: Participant) {
+  if (editingId.value !== participant.id) return
+  const name = editingName.value.trim()
+  cancelRename()
+  if (!name || name === participant.name) return
+  emit('update-participant', participant.id, { name })
+}
+
+function copyReport() {
+  const active = props.active
+    .map((participant) => {
+      const pin = participant.pinned ? ' pinned' : ''
+      const weight = weightOf(participant)
+      return `- ${participant.name}${pin}${weight > 1 ? ` x${weight}` : ''}`
+    })
+    .join('\n') || '- none'
+  const picked = props.removed
+    .map((participant, index) => `${participant.spin_order ?? index + 1}. ${participant.name}`)
+    .join('\n') || 'none'
+  void copyText(`Wheel report\n\nActive\n${active}\n\nPicked\n${picked}`, 'Report copied')
+}
+
+function replayPicked(participant: Participant, index: number) {
+  historyReplay.value = {
+    name: participant.name,
+    order: participant.spin_order ?? index + 1,
+  }
+}
+
+function showCopyStatus(message: string) {
+  copyStatus.value = message
+  clearTimeout(copyStatusTimer)
+  copyStatusTimer = setTimeout(() => {
+    copyStatus.value = ''
+  }, 1400)
+}
+
+async function copyText(text: string, message: string) {
+  if (!text) return
+  try {
+    await navigator.clipboard.writeText(text)
+    showCopyStatus(message)
+  } catch {
+    const area = document.createElement('textarea')
+    area.value = text
+    area.setAttribute('readonly', 'true')
+    area.style.position = 'fixed'
+    area.style.left = '-9999px'
+    document.body.appendChild(area)
+    area.select()
+    document.execCommand('copy')
+    area.remove()
+    showCopyStatus(message)
+  }
+}
+
+function copyActiveNames() {
+  void copyText(props.active.map((p) => p.name).join('\n'), 'Active copied')
+}
+
+function copyPickedNames() {
+  const text = props.removed
+    .map((p, index) => `#${p.spin_order ?? index + 1} ${p.name}`)
+    .join('\n')
+  void copyText(text, 'Picked copied')
+}
+
+onBeforeUnmount(() => {
+  clearTimeout(copyStatusTimer)
+})
 </script>
 
 <template>
-  <div class="name-list">
+  <div class="name-list" :class="[`theme-${themePreset}`, { compact: compactRows }]">
+    <div class="roster-top">
+      <div>
+        <span class="panel-kicker">Roster</span>
+        <h2>Participants</h2>
+      </div>
+      <div class="odds-pill">
+        <strong>{{ nextOdds }}</strong>
+        <span>{{ nextOddsLabel }}</span>
+      </div>
+    </div>
+
+    <div class="stats-strip" aria-label="Roster status">
+      <span><strong>{{ totalCount }}</strong>Total</span>
+      <span><strong>{{ active.length }}</strong>Active</span>
+      <span><strong>{{ removed.length }}</strong>Picked</span>
+      <span><strong>{{ totalWeight }}</strong>Tickets</span>
+    </div>
+
+    <div class="view-tabs" role="tablist" aria-label="Roster view">
+      <button
+        class="seg-btn"
+        :class="{ active: viewMode === 'all' }"
+        role="tab"
+        :aria-selected="viewMode === 'all'"
+        @click="viewMode = 'all'"
+      >
+        All
+      </button>
+      <button
+        class="seg-btn"
+        :class="{ active: viewMode === 'active' }"
+        role="tab"
+        :aria-selected="viewMode === 'active'"
+        @click="viewMode = 'active'"
+      >
+        Active
+      </button>
+      <button
+        class="seg-btn"
+        :class="{ active: viewMode === 'picked' }"
+        role="tab"
+        :aria-selected="viewMode === 'picked'"
+        @click="viewMode = 'picked'"
+      >
+        Picked
+      </button>
+    </div>
+
+    <div class="control-grid" aria-label="Roster controls">
+      <label class="sort-control">
+        <span>Sort</span>
+        <select v-model="sortMode">
+          <option value="added">Added</option>
+          <option value="name">Name</option>
+        </select>
+      </label>
+      <label class="sort-control">
+        <span>Theme</span>
+        <select
+          :value="themePreset"
+          @change="emit('update:theme-preset', ($event.target as HTMLSelectElement).value as 'classic' | 'arcade' | 'minimal')"
+        >
+          <option value="classic">Classic</option>
+          <option value="arcade">Arcade</option>
+          <option value="minimal">Minimal</option>
+        </select>
+      </label>
+      <label class="compact-toggle">
+        <input v-model="compactRows" type="checkbox" />
+        <span class="toggle-box" aria-hidden="true"></span>
+        <span>Compact</span>
+      </label>
+      <label class="compact-toggle">
+        <input
+          :checked="spectatorMode"
+          type="checkbox"
+          @change="emit('update:spectator-mode', ($event.target as HTMLInputElement).checked)"
+        />
+        <span class="toggle-box" aria-hidden="true"></span>
+        <span>Spectator</span>
+      </label>
+      <label class="compact-toggle sound-toggle">
+        <input
+          :checked="soundEnabled"
+          type="checkbox"
+          @change="emit('update:sound-enabled', ($event.target as HTMLInputElement).checked)"
+        />
+        <span class="toggle-box" aria-hidden="true"></span>
+        <span>Sound</span>
+      </label>
+      <input
+        class="sound-slider"
+        :value="soundIntensity"
+        type="range"
+        min="0.2"
+        max="1.6"
+        step="0.1"
+        :disabled="!soundEnabled"
+        @input="emit('update:sound-intensity', Number(($event.target as HTMLInputElement).value))"
+      />
+    </div>
+
     <div class="input-group">
       <input
-        ref="nameInputEl"
         v-model="nameInput"
         @keyup.enter="addName"
-        @paste="onPaste"
-        placeholder="Name (or paste a list)"
+        placeholder="Name, comma list, or pasted rows"
         class="name-input"
+        :disabled="spectatorMode"
       />
-      <button @click="addName" class="btn btn-add">Add</button>
+      <button @click="addName" class="btn btn-add" :disabled="spectatorMode">Add</button>
     </div>
-    <input v-model="searchTerm" placeholder="Search..." class="name-input search" style="margin-top: 4px; font-size: 12px;" />
 
-    <!-- Bulk-paste confirm: a pasted multi-name blob is parsed and deduped, then
-         held here so the count can be reviewed before it lands as one batch. -->
-    <div v-if="pendingPaste" class="paste-confirm" role="status">
-      <template v-if="pendingPaste.length > 0">
-        <span class="paste-count">
-          Add {{ pendingPaste.length }} new
-          {{ pendingPaste.length === 1 ? 'name' : 'names' }}?
+    <div class="tool-row">
+      <button
+        class="btn btn-ghost"
+        :class="{ active: bulkOpen }"
+        :disabled="spectatorMode"
+        @click="bulkOpen = !bulkOpen"
+      >
+        Bulk
+      </button>
+      <button class="btn btn-ghost" :disabled="active.length === 0" @click="copyActiveNames">
+        Copy active
+      </button>
+      <button class="btn btn-ghost" :disabled="removed.length === 0" @click="copyPickedNames">
+        Copy picked
+      </button>
+      <button class="btn btn-ghost" :disabled="active.length === 0" @click="copyReport">
+        Report
+      </button>
+      <button
+        class="btn btn-ghost"
+        :disabled="spectatorMode || !canNormalizeActive"
+        @click="normalizeActiveNames"
+      >
+        Normalize
+      </button>
+    </div>
+
+    <div v-if="bulkOpen" class="bulk-editor">
+      <textarea
+        v-model="bulkText"
+        placeholder="Paste names, or rows like Alice, 3, pinned"
+        rows="4"
+        :disabled="spectatorMode"
+      ></textarea>
+      <div class="bulk-footer">
+        <span>
+          {{ parsedBulkDrafts.length }} ready<span v-if="bulkConfiguredCount > 0">, {{ bulkConfiguredCount }} configured</span><span v-if="bulkDuplicateCount > 0">, {{ bulkDuplicateCount }} duplicate</span>
         </span>
-        <div class="paste-actions">
-          <button @click="confirmPaste" class="btn btn-paste-add">Add</button>
-          <button @click="cancelPaste" class="btn btn-paste-cancel">Cancel</button>
-        </div>
-      </template>
-      <template v-else>
-        <span class="paste-count">No new names in that paste.</span>
-        <button @click="cancelPaste" class="btn btn-paste-cancel">Dismiss</button>
-      </template>
-    </div>
-
-    <div class="participants">
-      <h3>Active ({{ active.length }}) <span v-if="comments && Object.keys(comments).length" style="font-size:10px;opacity:.6">💬 {{ Object.keys(comments).length }}</span></h3>
-      <!-- Roster filter: dims non-matching rows without removing them, so the
-           odds bars keep splitting across every active name. -->
-      <div v-if="active.length > 0" class="filter-group">
-        <input
-          v-model="filterQuery"
-          placeholder="Filter names…"
-          class="filter-input"
-          aria-label="Filter active names"
-        />
         <button
-          v-if="filterQuery"
-          @click="filterQuery = ''"
-          class="filter-clear"
-          title="Clear filter"
-          aria-label="Clear filter"
+          class="btn btn-add btn-compact"
+          :disabled="spectatorMode || parsedBulkDrafts.length === 0"
+          @click="importBulk"
         >
-          &times;
+          Import
         </button>
       </div>
-      <!-- Physical eject: when a name leaves the active list (picked by a spin
-           or removed by hand) the row slides out and blurs away while the rows
-           below slide up to fill the gap, instead of vanishing instantly. -->
-      <div
-        v-if="active.length > 0"
-        ref="listContainer"
-        class="roster-scroll"
-        @scroll="onListScroll"
-      >
-        <div class="virt-pad" :style="{ height: virtualSlice.padTop + 'px' }"></div>
-        <TransitionGroup tag="ul" name="eject" class="roster-virtual">
-          <li
-            v-for="(p, i) in virtualSlice.list"
-            :key="p.id"
-            class="participant-item"
-            :class="{
-              pending: p.pending,
-              error: p.error,
-              ticking: p.id === tickingId,
-              dimmed: !matchesFilter(p),
-              survivor: survivorReached,
-            }"
-            :style="{
-              '--odds-width': getOdds(p) + '%',
-              '--odds-color': identityColor(p.name),
-              '--tick-color': identityColor(p.name),
-            }"
-            draggable="true"
-            @dragstart="onDragStart(virtualSlice.start + i, $event)"
-            @dragover.prevent
-            @drop="onDrop(virtualSlice.start + i, $event)"
-            @dragenter.prevent
-            @mouseenter="emit('hover-name', p.id)"
-            @mouseleave="emit('hover-name', null)"
-          >
-          <span class="name-cell">
-            <span class="identity-token" :style="{ background: identityColor(p.name) }">{{
-              initialOf(p.name)
-            }}</span>
-            <span class="name-text">{{ p.name }}</span>
-            <span v-if="comments && comments[p.id] && comments[p.id].length" class="comment-badge" :title="comments[p.id].slice(-1)[0]">💬{{ comments[p.id].length }}</span>
-            <span v-if="lastPickedId === p.id && preventRepeat" class="last-badge" title="Last picked (prevent repeat active)">last</span>
-            <span v-if="survivorReached" class="survivor-chip" title="Last one standing">
-              Survivor
-            </span>
-          </span>
-          <span class="row-end">
-            <!-- Odds readout: each active name's equal chance of being picked
-                 next, rolled to its new value as the roster changes. Hidden on
-                 pending/error rows, which carry no odds (their bar is hidden
-                 too). -->
-            <span v-if="!p.pending && !p.error" class="sr-only">{{ p.name }}, {{ getOdds(p).toFixed(0) }} percent chance to be picked</span>
-            <span v-if="!p.pending && !p.error" class="odds-pct" aria-hidden="true">{{
-              getOdds(p).toFixed(0)
-            }}%</span>
-            <button
-              v-if="!p.pending"
-              @click="emit('remove', p.id)"
-              class="btn btn-remove"
-              title="Remove"
-            >
-              &times;
-            </button>
-          </span>
-        </li>
-        </TransitionGroup>
-        <div class="virt-pad" :style="{ height: virtualSlice.padBot + 'px' }"></div>
-      </div>
-      <p v-if="active.length > 0 && filterMatchCount === 0" class="filter-empty">
-        No active names match “{{ filterQuery.trim() }}”.
-      </p>
-      <div v-else-if="active.length === 0" class="empty-card">
-        <span class="empty-mark" aria-hidden="true">○</span>
-        <p class="empty-title">No one's on the wheel yet</p>
-        <p class="empty-sub">Add names above, or drop in a sample roster to try a spin.</p>
-        <button @click="addSampleNames" class="btn btn-sample">Try sample names</button>
+      <div v-if="bulkPreviewDrafts.length > 0" class="bulk-preview">
+        <span v-for="draft in bulkPreviewDrafts" :key="draft.name">
+          {{ draft.name }}<template v-if="draft.weight && draft.weight > 1"> x{{ draft.weight }}</template><template v-if="draft.pinned"> pinned</template>
+        </span>
       </div>
     </div>
 
-    <div v-if="removed.length > 0" class="participants removed-list">
-      <h3>Picked ({{ removed.length }})</h3>
-      <ol>
+    <p v-if="copyStatus" class="copy-status" role="status">{{ copyStatus }}</p>
+
+    <div v-if="undoAction" class="copy-status undo-status" role="status">
+      <span>{{ undoAction.label }} ready</span>
+      <button class="notice-action" :disabled="spectatorMode" @click="runUndoAction">
+        {{ undoAction.label }}
+      </button>
+    </div>
+
+    <div v-if="duplicateNames.length > 0" class="notice">
+      <span>
+        {{ duplicateNames.length }} duplicate name{{ duplicateNames.length === 1 ? '' : 's' }} in the roster
+      </span>
+      <button
+        v-if="activeDuplicateIds.length > 0"
+        class="notice-action"
+        :disabled="spectatorMode"
+        @click="removeActiveDuplicates"
+      >
+        Remove {{ activeDuplicateIds.length }} active
+      </button>
+    </div>
+
+    <div v-if="totalCount > 4" class="search-box">
+      <input
+        v-model="searchQuery"
+        class="search-input"
+        placeholder="Search roster"
+        type="search"
+      />
+      <button
+        v-if="searchQuery"
+        class="clear-search"
+        title="Clear search"
+        @click="searchQuery = ''"
+      >
+        &times;
+      </button>
+    </div>
+
+    <div v-if="showActiveSection" class="participants">
+      <div class="section-heading">
+        <h3>Active</h3>
+        <span>{{ activeFiltered.length }} shown</span>
+      </div>
+      <ul v-if="activeFiltered.length > 0">
         <li
-          v-for="p in removed"
+          v-for="p in activeFiltered"
           :key="p.id"
-          class="participant-item picked"
-          :class="medalTier(p.spin_order) ? 'medal-' + medalTier(p.spin_order) : null"
+          class="participant-item"
+          :class="{ pending: p.pending, error: p.error, pinned: p.pinned, weighted: weightOf(p) > 1 }"
         >
           <span class="name-cell">
-            <span
-              class="rank-chip"
-              :class="medalTier(p.spin_order) ? 'medal-' + medalTier(p.spin_order) : null"
-              >#{{ p.spin_order }}</span
-            >
             <span class="identity-token" :style="{ background: identityColor(p.name) }">{{
               initialOf(p.name)
             }}</span>
-            <span class="name-text">{{ p.name }}</span>
-            <span v-if="comments && comments[p.id] && comments[p.id].length" class="comment-badge" :title="comments[p.id].slice(-1)[0]">💬{{ comments[p.id].length }}</span>
-            <span v-if="lastPickedId === p.id && preventRepeat" class="last-badge" title="Last picked (prevent repeat active)">last</span>
+            <input
+              v-if="editingId === p.id"
+              v-model="editingName"
+              class="rename-input"
+              :aria-label="`Rename ${p.name}`"
+              @blur="saveRename(p)"
+              @keyup.enter="saveRename(p)"
+              @keyup.esc="cancelRename"
+            />
+            <button
+              v-else
+              class="name-text name-button"
+              :title="spectatorMode ? p.name : `Rename ${p.name}`"
+              :disabled="spectatorMode || p.pending"
+              @click="startRename(p)"
+            >
+              {{ p.name }}
+            </button>
           </span>
+          <span class="row-tools">
+            <button
+              class="mini-btn"
+              :class="{ active: p.pinned }"
+              :title="p.pinned ? 'Unpin' : 'Pin'"
+              :aria-label="p.pinned ? `Unpin ${p.name}` : `Pin ${p.name}`"
+              :aria-pressed="p.pinned"
+              :disabled="spectatorMode"
+              @click="togglePin(p)"
+            >
+              Pin
+            </button>
+            <button
+              class="mini-btn"
+              title="Decrease weight"
+              :aria-label="`Decrease ${p.name} weight`"
+              :disabled="spectatorMode || weightOf(p) <= 1"
+              @click="setWeight(p, weightOf(p) - 1)"
+            >
+              -
+            </button>
+            <span class="weight-pill" :title="`${p.name} has ${weightOf(p)} ticket${weightOf(p) === 1 ? '' : 's'}`">
+              x{{ weightOf(p) }}
+            </span>
+            <button
+              class="mini-btn"
+              title="Increase weight"
+              :aria-label="`Increase ${p.name} weight`"
+              :disabled="spectatorMode || weightOf(p) >= 5"
+              @click="setWeight(p, weightOf(p) + 1)"
+            >
+              +
+            </button>
+          </span>
+          <button
+            v-if="!p.pending"
+            @click="emit('remove', p.id)"
+            class="btn btn-remove"
+            title="Remove"
+            :aria-label="`Remove ${p.name}`"
+            :disabled="spectatorMode || p.pinned"
+          >
+            &times;
+          </button>
+        </li>
+      </ul>
+      <p v-else class="empty">{{ active.length === 0 ? 'No active participants' : 'No active matches' }}</p>
+    </div>
+
+    <div v-if="showPickedSection && (removed.length > 0 || viewMode === 'picked')" class="participants removed-list">
+      <div class="section-heading">
+        <h3>Picked</h3>
+        <span>{{ removedFiltered.length }} shown</span>
+      </div>
+      <ol v-if="removedFiltered.length > 0">
+        <li v-for="(p, index) in removedFiltered" :key="p.id" class="participant-item picked">
+          <span class="name-cell">
+            <span class="identity-token" :style="{ background: identityColor(p.name) }">{{
+              initialOf(p.name)
+            }}</span>
+            <span class="name-text">#{{ p.spin_order ?? index + 1 }} - {{ p.name }}</span>
+          </span>
+          <button class="mini-btn" @click="replayPicked(p, index)">Replay</button>
         </li>
       </ol>
-      <button @click="emit('reset')" class="btn btn-reset">Reset All</button>
+      <p v-else class="empty">{{ removed.length === 0 ? 'No picks yet' : 'No picked matches' }}</p>
+      <p v-if="historyReplay" class="copy-status replay-status">
+        Replay #{{ historyReplay.order }}: {{ historyReplay.name }}
+      </p>
+      <button
+        @click="emit('reset')"
+        class="btn btn-reset"
+        :disabled="spectatorMode || removed.length === 0"
+      >
+        Reset All
+      </button>
     </div>
+
+    <p v-if="searchQuery" class="view-footnote">
+      {{ visibleCount }} visible<span v-if="pinnedCount > 0">, {{ pinnedCount }} pinned</span>
+    </p>
   </div>
 </template>
 
 <style scoped>
 .name-list {
   width: 100%;
-  max-width: 360px;
+  --accent: #4ecdc4;
+  --accent-hover: #66ded6;
+  --accent-contrast: #162326;
+  --accent-soft: rgba(78, 205, 196, 0.14);
+  --accent-border: rgba(78, 205, 196, 0.38);
+  --accent-ring: rgba(78, 205, 196, 0.16);
+  --accent-text: #7ff5ec;
+  color: #edf3f4;
+}
+
+.name-list.theme-arcade {
+  --accent: #ff5c8a;
+  --accent-hover: #ff7ba2;
+  --accent-contrast: #210b14;
+  --accent-soft: rgba(255, 92, 138, 0.15);
+  --accent-border: rgba(255, 92, 138, 0.42);
+  --accent-ring: rgba(255, 92, 138, 0.18);
+  --accent-text: #ffc0d2;
+}
+
+.name-list.theme-minimal {
+  --accent: #dfe6e9;
+  --accent-hover: #ffffff;
+  --accent-contrast: #111719;
+  --accent-soft: rgba(223, 230, 233, 0.11);
+  --accent-border: rgba(223, 230, 233, 0.28);
+  --accent-ring: rgba(223, 230, 233, 0.14);
+  --accent-text: #ffffff;
+}
+
+.roster-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.panel-kicker {
+  display: block;
+  margin-bottom: 4px;
+  color: #95a5a6;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+h2 {
+  margin: 0;
+  color: #f7fbfc;
+  font-size: 20px;
+  line-height: 1.15;
+}
+
+.odds-pill {
+  min-width: 104px;
+  padding: 8px 10px;
+  border: 1px solid var(--accent-border);
+  border-radius: 8px;
+  background: var(--accent-soft);
+  text-align: right;
+}
+
+.odds-pill strong {
+  display: block;
+  color: var(--accent);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.odds-pill span {
+  color: #aab7ba;
+  font-size: 11px;
+}
+
+.stats-strip {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.stats-strip span {
+  min-width: 0;
+  padding: 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.055);
+  color: #aab7ba;
+  font-size: 11px;
+}
+
+.stats-strip strong {
+  display: block;
+  color: #f7fbfc;
+  font-size: 16px;
+  line-height: 1.1;
+}
+
+.view-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  margin-bottom: 10px;
+  background: rgba(12, 16, 18, 0.42);
+}
+
+.seg-btn {
+  min-width: 0;
+  min-height: 30px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #95a5a6;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.seg-btn:hover,
+.seg-btn.active {
+  background: var(--accent-soft);
+  color: #ffffff;
+}
+
+.control-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(12, 16, 18, 0.28);
+}
+
+.sort-control {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  color: #95a5a6;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.sort-control select {
+  width: 100%;
+  min-height: 32px;
+  border: 1px solid rgba(223, 230, 233, 0.16);
+  border-radius: 8px;
+  background: rgba(12, 16, 18, 0.68);
+  color: #edf3f4;
+  font: inherit;
+  font-size: 13px;
+}
+
+.sort-control select:focus {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+
+.compact-toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 0 9px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.055);
+  color: #dfe6e9;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.sound-toggle {
+  align-self: stretch;
+}
+
+.compact-toggle input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.toggle-box {
+  width: 14px;
+  height: 14px;
+  border: 1px solid rgba(223, 230, 233, 0.34);
+  border-radius: 4px;
+  background: rgba(12, 16, 18, 0.68);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.08) inset;
+}
+
+.compact-toggle input:checked + .toggle-box {
+  border-color: var(--accent-border);
+  background: var(--accent);
+}
+
+.compact-toggle input:checked + .toggle-box::after {
+  content: "";
+  display: block;
+  width: 7px;
+  height: 4px;
+  margin: 3px 0 0 3px;
+  border: solid var(--accent-contrast);
+  border-width: 0 0 2px 2px;
+  transform: rotate(-45deg);
+}
+
+.compact-toggle input:focus-visible + .toggle-box {
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+
+.sound-slider {
+  min-width: 0;
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.sound-slider:disabled {
+  opacity: 0.45;
 }
 
 .input-group {
   display: flex;
   gap: 8px;
-  margin-bottom: 16px;
+  margin-bottom: 10px;
+}
+
+.name-input,
+.rename-input,
+.search-input,
+.bulk-editor textarea {
+  width: 100%;
+  border: 1px solid rgba(223, 230, 233, 0.18);
+  border-radius: 8px;
+  background: rgba(12, 16, 18, 0.68);
+  color: #edf3f4;
+  font: inherit;
 }
 
 .name-input {
   flex: 1;
-  padding: 10px 14px;
-  border: 2px solid #dfe6e9;
-  border-radius: 8px;
+  min-width: 0;
+  padding: 11px 12px;
   font-size: 14px;
-  background: #2d3436;
-  color: #dfe6e9;
 }
 
-.name-input:focus {
-  border-color: #4ECDC4;
-}
-
-/* Roster filter field: sits between the Active heading and the list. */
-.filter-group {
-  position: relative;
-  margin-bottom: 8px;
-}
-
-.filter-input {
-  width: 100%;
-  padding: 7px 28px 7px 12px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 6px;
-  font-size: 13px;
-  background: rgba(255, 255, 255, 0.05);
-  color: #dfe6e9;
-  box-sizing: border-box;
-}
-
-.filter-input::placeholder {
-  color: #7f8c8d;
-}
-
-.filter-input:focus {
-  border-color: #4ECDC4;
-}
-
-.filter-clear {
-  position: absolute;
-  top: 50%;
-  right: 6px;
-  transform: translateY(-50%);
-  padding: 2px 6px;
-  border: none;
-  border-radius: 4px;
-  background: transparent;
-  color: #95a5a6;
-  font-size: 16px;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.filter-clear:hover {
-  color: #dfe6e9;
+.name-input:focus,
+.rename-input:focus,
+.search-input:focus,
+.bulk-editor textarea:focus {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-ring);
 }
 
 .btn {
-  padding: 10px 16px;
   border: none;
   border-radius: 8px;
   cursor: pointer;
-  font-weight: bold;
-  font-size: 14px;
+  font-weight: 700;
+  font-size: 13px;
+  transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease;
+}
+
+.btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .btn-add {
-  background: #4ECDC4;
-  color: #2d3436;
+  padding: 10px 15px;
+  background: var(--accent);
+  color: var(--accent-contrast);
 }
 
-.btn-add:hover {
-  background: #45b7aa;
+.btn-add:hover:not(:disabled) {
+  background: var(--accent-hover);
 }
 
-/* Bulk-paste confirm strip: a glass row between the input and the roster that
-   shows the parsed count and the Add/Cancel actions before committing. */
-.paste-confirm {
+.btn-compact {
+  padding: 8px 12px;
+}
+
+.tool-row {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
   flex-wrap: wrap;
-  margin: -8px 0 16px;
-  padding: 10px 14px;
-  border-radius: 8px;
-  background: rgba(78, 205, 196, 0.1);
-  border: 1px solid rgba(78, 205, 196, 0.3);
-  animation: paste-slide 0.22s ease both;
+  gap: 6px;
+  margin-bottom: 12px;
 }
 
-.paste-count {
-  font-size: 13px;
+.btn-ghost {
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  background: rgba(255, 255, 255, 0.055);
   color: #dfe6e9;
 }
 
-.paste-actions {
+.btn-ghost:hover:not(:disabled),
+.btn-ghost.active {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+  color: #ffffff;
+}
+
+.bulk-editor {
+  margin-bottom: 12px;
+}
+
+.bulk-editor textarea {
+  display: block;
+  min-height: 92px;
+  padding: 11px 12px;
+  resize: vertical;
+}
+
+.bulk-footer {
   display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  color: #95a5a6;
+  font-size: 12px;
+}
+
+.bulk-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+.bulk-preview span {
+  max-width: 100%;
+  overflow: hidden;
+  padding: 4px 7px;
+  border: 1px solid var(--accent-border);
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.copy-status,
+.notice {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.copy-status {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.undo-status {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
   gap: 8px;
 }
 
-.btn-paste-add {
-  background: #4ECDC4;
-  color: #2d3436;
-  padding: 7px 16px;
+.notice {
+  background: rgba(255, 234, 167, 0.12);
+  color: #ffeaa7;
+}
+
+.notice {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.notice span {
+  min-width: 0;
+}
+
+.notice-action {
+  flex: none;
+  min-height: 26px;
+  padding: 0 8px;
+  border: 1px solid rgba(255, 234, 167, 0.28);
+  border-radius: 6px;
+  background: rgba(255, 234, 167, 0.12);
+  color: #fff5bd;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.notice-action:hover {
+  background: rgba(255, 234, 167, 0.2);
+}
+
+.notice-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.search-box {
+  position: relative;
+  margin-bottom: 14px;
+}
+
+.search-input {
+  padding: 10px 34px 10px 12px;
   font-size: 13px;
 }
 
-.btn-paste-add:hover {
-  background: #45b7aa;
-}
-
-.btn-paste-cancel {
+.clear-search {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  width: 24px;
+  height: 24px;
+  transform: translateY(-50%);
+  border: none;
+  border-radius: 6px;
   background: transparent;
   color: #95a5a6;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  padding: 7px 14px;
-  font-size: 13px;
-}
-
-.btn-paste-cancel:hover {
-  color: #dfe6e9;
-  border-color: rgba(255, 255, 255, 0.3);
-}
-
-@keyframes paste-slide {
-  from {
-    opacity: 0;
-    transform: translateY(-4px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .paste-confirm {
-    animation: none;
-  }
-}
-
-.btn-remove {
-  position: relative;
-  background: transparent;
-  color: #e74c3c;
+  cursor: pointer;
   font-size: 18px;
-  padding: 4px 8px;
+  line-height: 20px;
 }
 
-.btn-remove:hover {
-  background: rgba(231, 76, 60, 0.15);
+.clear-search:hover {
+  background: rgba(255, 255, 255, 0.09);
+  color: #ffffff;
+}
+
+.participants {
+  margin-top: 12px;
+}
+
+.section-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
 }
 
 h3 {
-  margin: 0 0 8px;
-  font-size: 14px;
-  color: #b2bec3;
+  margin: 0;
+  color: #aab7ba;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0;
   text-transform: uppercase;
-  letter-spacing: 1px;
 }
 
-ul, ol {
+.section-heading span {
+  color: #758184;
+  font-size: 11px;
+}
+
+ul,
+ol {
   list-style: none;
   padding: 0;
   margin: 0;
 }
 
-/* Positioning context so an ejecting row (position: absolute during its leave
-   transition) is measured against the list, not the page. */
-ul {
-  position: relative;
-}
-
-ol {
-  list-style: none;
-}
-
 .participant-item {
-  position: relative;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 8px 12px;
-  border-radius: 6px;
-  margin-bottom: 4px;
-  background: rgba(255, 255, 255, 0.05);
-  overflow: hidden;
-  /* Snappy catch on the spin spotlight, easing out as the next row takes over. */
-  transition:
-    transform 0.18s ease-out,
-    box-shadow 0.18s ease-out,
-    background 0.18s ease-out;
+  gap: 8px;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  margin-bottom: 6px;
+  background: rgba(255, 255, 255, 0.055);
 }
 
-/* Live odds bar: a tinted fill behind the row, its width the participant's
-   chance of being picked next (equal split across active names). The width
-   transitions as the roster changes, so adding a name visibly shortens every
-   bar. Sits behind the content; --odds-width/--odds-color are set per row. */
-.participant-item::before {
-  content: '';
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: var(--odds-width, 0%);
-  background: var(--odds-color, transparent);
-  opacity: 0.16;
-  border-radius: inherit;
-  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-  pointer-events: none;
+.participant-item.pinned {
+  border-color: var(--accent-border);
+  background:
+    linear-gradient(90deg, var(--accent-soft), rgba(255, 255, 255, 0.055) 42%),
+    rgba(255, 255, 255, 0.055);
 }
 
-/* Removed/optimistic rows don't carry odds, so hide their bar. */
-.participant-item.picked::before,
-.participant-item.pending::before,
-.participant-item.error::before {
-  display: none;
+.participant-item.weighted:not(.pinned) {
+  border-color: rgba(255, 234, 167, 0.18);
 }
 
 .name-cell {
-  position: relative;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 9px;
+  flex: 1 1 auto;
   min-width: 0;
 }
 
@@ -634,172 +1268,132 @@ ol {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.comment-badge {
-  font-size: 10px;
-  background: #333;
-  padding: 0 4px;
-  border-radius: 3px;
-  margin-left: 4px;
+
+.name-button {
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.name-button:hover:not(:disabled) {
+  color: var(--accent-text);
+}
+
+.name-button:disabled {
   cursor: default;
 }
-.last-badge {
-  font-size: 9px;
-  background: #e74c3c;
-  color: white;
-  padding: 0 3px;
-  border-radius: 2px;
-  margin-left: 4px;
-}
 
-/* Right cluster: the rolled odds readout next to the remove control, kept above
-   the odds bar fill so the percentage stays legible. */
-.row-end {
-  position: relative;
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-/* Per-row odds label: the tweened "n%" chance of being picked next. Tinted to
-   the same identity color as the row's odds bar via --odds-color, with tabular
-   figures so the digits don't jitter as the number rolls. */
-.odds-pct {
-  font-size: 12px;
-  font-weight: bold;
-  font-variant-numeric: tabular-nums;
-  color: var(--odds-color, #95a5a6);
-  opacity: 0.85;
-}
-
-.participant-item.ticking .odds-pct {
-  opacity: 1;
+.rename-input {
+  min-width: 0;
+  height: 28px;
+  padding: 4px 7px;
+  font-size: 13px;
 }
 
 /* Round identity token: deterministic per-name color matching the wheel
    segment, with the participant's initial. */
 .identity-token {
   flex: none;
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   border-radius: 50%;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.22) inset;
+  color: #162326;
   font-size: 11px;
-  font-weight: bold;
-  color: #2d3436;
+  font-weight: 800;
   text-decoration: none;
 }
 
 .participant-item.picked {
-  opacity: 0.6;
+  opacity: 0.7;
+}
+
+.participant-item.picked .name-text {
   text-decoration: line-through;
 }
 
-/* Medal tiers: the first three names off the wheel keep a little more presence
-   than the rest of the picked list, lifted by a left accent in their tier color
-   so the earliest exits read as a podium. --medal is set per tier below. */
-.participant-item.picked.medal-gold,
-.participant-item.picked.medal-silver,
-.participant-item.picked.medal-bronze {
-  opacity: 0.85;
-  box-shadow: inset 3px 0 0 var(--medal);
-}
-
-.participant-item.medal-gold {
-  --medal: #ffd54a;
-}
-
-.participant-item.medal-silver {
-  --medal: #cfd8dc;
-}
-
-.participant-item.medal-bronze {
-  --medal: #d99c66;
-}
-
-/* Rank chip: the 1-based elimination order, leading each picked row. Plain rows
-   carry a muted chip; medal rows tint theirs to the tier color and skip the
-   strike-through so the number stays legible. */
-.rank-chip {
+.row-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   flex: none;
+}
+
+.mini-btn {
   min-width: 26px;
-  padding: 2px 6px;
-  border-radius: 999px;
+  min-height: 26px;
+  padding: 0 7px;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.055);
+  color: #dfe6e9;
+  cursor: pointer;
+  font: inherit;
   font-size: 11px;
-  font-weight: bold;
+  font-weight: 800;
+}
+
+.mini-btn[aria-pressed="true"] {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+  color: #ffffff;
+}
+
+.mini-btn:hover:not(:disabled),
+.mini-btn.active {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+  color: #ffffff;
+}
+
+.mini-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.weight-pill {
+  min-width: 30px;
+  padding: 4px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  background: rgba(12, 16, 18, 0.52);
+  color: #aab7ba;
+  font-size: 11px;
+  font-weight: 800;
   text-align: center;
-  text-decoration: none;
-  color: #b2bec3;
-  background: rgba(255, 255, 255, 0.08);
 }
 
-.rank-chip.medal-gold,
-.rank-chip.medal-silver,
-.rank-chip.medal-bronze {
-  color: #1e1e1e;
-  background: var(--medal);
+.participant-item.weighted .weight-pill {
+  border-color: rgba(255, 234, 167, 0.24);
+  color: #ffeaa7;
 }
 
-.rank-chip.medal-gold {
-  --medal: #ffd54a;
+.name-list.compact .participant-item {
+  min-height: 32px;
+  padding: 5px 8px;
+  margin-bottom: 4px;
 }
 
-.rank-chip.medal-silver {
-  --medal: #cfd8dc;
-}
-
-.rank-chip.medal-bronze {
-  --medal: #d99c66;
-}
-
-/* Survivor: the lone active row once everyone else has been picked. A gold trim
-   and a small chip crown the last one standing, mirroring the picked-list gold
-   medal. */
-.participant-item.survivor {
-  box-shadow: inset 0 0 0 1px rgba(255, 213, 74, 0.6);
-  background: color-mix(in srgb, #ffd54a 12%, rgba(255, 255, 255, 0.05));
-}
-
-.survivor-chip {
-  flex: none;
-  padding: 2px 8px;
-  border-radius: 999px;
+.name-list.compact .identity-token {
+  width: 20px;
+  height: 20px;
   font-size: 10px;
-  font-weight: bold;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: #1e1e1e;
-  background: #ffd54a;
 }
 
-/* Filtered out: the row stays in the DOM (so odds bars stay correct) but recedes
-   so the matching rows read clearly. A ticking row overrides this to stay lit. */
-.participant-item.dimmed:not(.ticking) {
-  opacity: 0.32;
-  filter: grayscale(0.4);
-  transition: opacity 0.18s ease, filter 0.18s ease;
+.name-list.compact .participants {
+  margin-top: 10px;
 }
 
-/* Spin spotlight: while a participant's wheel segment is under the pointer, its
-   roster row briefly lifts and glows in the participant's identity color, so the
-   list reads the spin in sync with the wheel. The class is toggled on/off as the
-   pointer crosses segments, so the ease-out transition does the flashing without
-   a keyframe restart. The transition stays short on the way in (snappy catch) and
-   eases out as the next row takes over. */
-.participant-item.ticking {
-  transform: scale(1.04);
-  background: color-mix(in srgb, var(--tick-color, #4ECDC4) 22%, rgba(255, 255, 255, 0.05));
-  box-shadow: 0 0 0 1px var(--tick-color, #4ECDC4), 0 4px 16px rgba(0, 0, 0, 0.35);
-  z-index: 1;
-}
-
-/* Reduced motion: keep the color/glow flash but drop the scale lift. */
-@media (prefers-reduced-motion: reduce) {
-  .participant-item.ticking {
-    transform: none;
-  }
+.name-list.compact .section-heading {
+  margin-bottom: 6px;
 }
 
 /* Optimistic add: a settling skeleton chip that pulses until the server
@@ -811,155 +1405,113 @@ ol {
 
 /* Failed add: shake briefly before the row is removed. */
 .participant-item.error {
-  color: #e74c3c;
+  color: #ff8a7f;
   background: rgba(231, 76, 60, 0.12);
   animation: chip-shake 0.4s ease-in-out;
 }
 
+.btn-remove {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  color: #ff8a7f;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.btn-remove:hover {
+  background: rgba(231, 76, 60, 0.15);
+}
+
+.btn-remove:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
 @keyframes chip-pulse {
-  0%, 100% { opacity: 0.5; }
-  50% { opacity: 0.85; }
-}
-
-/* Eject (TransitionGroup): the leaving row is pulled out of flow so the rows
-   below glide up to close the gap (move transition), while the row itself
-   slides right, shrinks and blurs out, giving a physical "flung off the wheel"
-   feel with no confetti. */
-.eject-leave-active {
-  position: absolute;
-  width: 100%;
-}
-
-.eject-leave-to {
-  opacity: 0;
-  transform: translateX(40px) scale(0.85);
-  filter: blur(4px);
-}
-
-.eject-leave-active,
-.eject-move {
-  transition:
-    transform 0.4s cubic-bezier(0.4, 0, 0.2, 1),
-    opacity 0.4s ease,
-    filter 0.4s ease;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .eject-leave-to {
-    transform: none;
-    filter: none;
+  0%,
+  100% {
+    opacity: 0.5;
   }
-
-  .eject-leave-active,
-  .eject-move {
-    transition: opacity 0.2s ease;
+  50% {
+    opacity: 0.85;
   }
 }
 
 @keyframes chip-shake {
-  0%, 100% { transform: translateX(0); }
-  20% { transform: translateX(-5px); }
-  40% { transform: translateX(5px); }
-  60% { transform: translateX(-3px); }
-  80% { transform: translateX(3px); }
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20% {
+    transform: translateX(-5px);
+  }
+  40% {
+    transform: translateX(5px);
+  }
+  60% {
+    transform: translateX(-3px);
+  }
+  80% {
+    transform: translateX(3px);
+  }
 }
 
-/* Empty state: a glass card that invites a first roster instead of a bare line
-   of italic text, with a one-click sample roster routed through add-batch. */
-.empty-card {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  text-align: center;
-  gap: 6px;
-  padding: 24px 20px;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px dashed rgba(255, 255, 255, 0.12);
-}
-
-/* Shown when a filter query excludes every active row. */
-.filter-empty {
-  margin: 4px 0 0;
-  padding: 12px;
-  text-align: center;
-  font-size: 12px;
-  color: #95a5a6;
-}
-
-.empty-mark {
-  font-size: 28px;
-  line-height: 1;
-  color: #4ECDC4;
-  opacity: 0.7;
-  margin-bottom: 2px;
-}
-
-.empty-title {
-  margin: 0;
-  font-size: 14px;
-  font-weight: bold;
-  color: #dfe6e9;
-}
-
-.empty-sub {
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.4;
-  color: #95a5a6;
-  max-width: 240px;
-}
-
-.btn-sample {
-  margin-top: 10px;
-  background: rgba(78, 205, 196, 0.14);
-  color: #4ECDC4;
-  border: 1px solid rgba(78, 205, 196, 0.35);
-  padding: 9px 18px;
+.empty {
+  margin: 8px 0 0;
+  color: #6f7b7e;
   font-size: 13px;
-  transition: background 0.18s ease;
-}
-
-.btn-sample:hover {
-  background: rgba(78, 205, 196, 0.24);
+  font-style: italic;
 }
 
 .removed-list {
-  margin-top: 16px;
-  padding-top: 16px;
+  padding-top: 14px;
   border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.replay-status {
+  margin-top: 8px;
 }
 
 .btn-reset {
   width: 100%;
-  margin-top: 12px;
-  background: rgba(255, 234, 167, 0.15);
-  color: #FFEAA7;
+  margin-top: 10px;
   padding: 10px;
-  border: 1px solid rgba(255, 234, 167, 0.3);
-  border-radius: 8px;
-  cursor: pointer;
-  font-weight: bold;
-  font-size: 13px;
+  border: 1px solid rgba(255, 234, 167, 0.28);
+  background: rgba(255, 234, 167, 0.12);
+  color: #ffeaa7;
 }
 
 .btn-reset:hover {
-  background: rgba(255, 234, 167, 0.25);
+  background: rgba(255, 234, 167, 0.2);
 }
 
-/* Virtualization container for roster perf with long lists. */
-.roster-scroll {
-  max-height: 320px;
-  overflow: auto;
-  contain: layout paint;
+.view-footnote {
+  margin: 10px 0 0;
+  color: #758184;
+  font-size: 12px;
+  text-align: right;
 }
-.roster-virtual {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-.virt-pad {
-  height: 0;
-  pointer-events: none;
+
+@media (max-width: 420px) {
+  .stats-strip {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .control-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .participant-item {
+    flex-wrap: wrap;
+  }
+
+  .row-tools {
+    order: 3;
+    width: 100%;
+    justify-content: flex-end;
+  }
 }
 </style>

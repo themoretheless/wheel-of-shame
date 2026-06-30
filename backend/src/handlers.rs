@@ -4,9 +4,9 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 
-use crate::store::AppState;
 use crate::error::AppError;
 use crate::models::*;
+use crate::store::AppState;
 use crate::ws::SessionEvent;
 
 /// Maximum length, in characters, of a session title.
@@ -172,6 +172,58 @@ pub async fn delete_participant(
     Ok(StatusCode::NO_CONTENT)
 }
 
+pub async fn update_participant(
+    State(state): State<AppState>,
+    Path((session_id, participant_id)): Path<(String, String)>,
+    Json(req): Json<UpdateParticipantRequest>,
+) -> Result<Json<Participant>, AppError> {
+    let name = match req.name {
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Err(AppError::BadRequest("Name cannot be empty".into()));
+            }
+            if trimmed.chars().count() > MAX_NAME_LEN {
+                return Err(AppError::BadRequest(format!(
+                    "Name must be at most {MAX_NAME_LEN} characters"
+                )));
+            }
+            Some(trimmed.to_string())
+        }
+        None => None,
+    };
+
+    if name.is_none() && req.pinned.is_none() && req.weight.is_none() {
+        return Err(AppError::BadRequest(
+            "At least one participant setting is required".into(),
+        ));
+    }
+    if let Some(weight) = req.weight {
+        if !(MIN_PARTICIPANT_WEIGHT..=MAX_PARTICIPANT_WEIGHT).contains(&weight) {
+            return Err(AppError::BadRequest(format!(
+                "Weight must be between {MIN_PARTICIPANT_WEIGHT} and {MAX_PARTICIPANT_WEIGHT}"
+            )));
+        }
+    }
+
+    let participant = state
+        .store
+        .update_participant(&session_id, &participant_id, name, req.pinned, req.weight)
+        .await?;
+
+    state
+        .hub
+        .broadcast(
+            &session_id,
+            SessionEvent::ParticipantUpdated {
+                participant: participant.clone(),
+            },
+        )
+        .await;
+
+    Ok(Json(participant))
+}
+
 pub async fn spin(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
@@ -272,28 +324,45 @@ pub async fn update_participant_props(
         let wa = Action {
             id: uuid::Uuid::new_v4().to_string(),
             session_id: session_id.clone(),
-            kind: ActionKind::UpdateWeight { id: pid.clone(), weight: w },
+            kind: ActionKind::UpdateWeight {
+                id: pid.clone(),
+                weight: w,
+            },
             timestamp: chrono::Utc::now(),
             actor: None,
         };
         let _ = state.store.append_action(&wa).await;
-        state.hub.broadcast(&session_id, SessionEvent::ActionLogged { action: wa }).await;
+        state
+            .hub
+            .broadcast(&session_id, SessionEvent::ActionLogged { action: wa })
+            .await;
     }
     if let Some(v) = req.visual.clone() {
         let va = Action {
             id: uuid::Uuid::new_v4().to_string(),
             session_id: session_id.clone(),
-            kind: ActionKind::UpdateVisual { id: pid.clone(), visual: v },
+            kind: ActionKind::UpdateVisual {
+                id: pid.clone(),
+                visual: v,
+            },
             timestamp: chrono::Utc::now(),
             actor: None,
         };
         let _ = state.store.append_action(&va).await;
-        state.hub.broadcast(&session_id, SessionEvent::ActionLogged { action: va }).await;
+        state
+            .hub
+            .broadcast(&session_id, SessionEvent::ActionLogged { action: va })
+            .await;
     }
 
     state
         .hub
-        .broadcast(&session_id, SessionEvent::SegmentUpdated { participant: participant.clone() })
+        .broadcast(
+            &session_id,
+            SessionEvent::SegmentUpdated {
+                participant: participant.clone(),
+            },
+        )
         .await;
 
     Ok(Json(participant))
@@ -305,7 +374,11 @@ pub async fn list_actions(
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Vec<Action>>, AppError> {
     ensure_session_exists(&state, &session_id).await?;
-    let limit: usize = q.get("limit").and_then(|s| s.parse().ok()).unwrap_or(50).clamp(1, 200);
+    let limit: usize = q
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50)
+        .clamp(1, 200);
     let actions = state.store.list_actions(&session_id, limit).await?;
     Ok(Json(actions))
 }
@@ -349,7 +422,9 @@ pub async fn restore_from_snapshot(
     let action = Action {
         id: uuid::Uuid::new_v4().to_string(),
         session_id: session_id.clone(),
-        kind: ActionKind::SnapshotRestored { snapshot_id: uuid::Uuid::new_v4().to_string() },
+        kind: ActionKind::SnapshotRestored {
+            snapshot_id: uuid::Uuid::new_v4().to_string(),
+        },
         timestamp: chrono::Utc::now(),
         actor: None,
     };
@@ -357,7 +432,12 @@ pub async fn restore_from_snapshot(
 
     state
         .hub
-        .broadcast(&session_id, SessionEvent::SnapshotRestored { participants: participants.clone() })
+        .broadcast(
+            &session_id,
+            SessionEvent::SnapshotRestored {
+                participants: participants.clone(),
+            },
+        )
         .await;
 
     Ok((StatusCode::OK, Json(participants)))

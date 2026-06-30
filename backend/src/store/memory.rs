@@ -4,15 +4,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rand::prelude::IndexedRandom;
 use tokio::sync::RwLock;
 
 use crate::error::AppError;
-use crate::models::{Action, Participant, SegmentVisual, Session, Snapshot, SpinResult};
+use crate::models::{
+    Action, Participant, SegmentVisual, Session, Snapshot, SpinResult, MAX_PARTICIPANT_WEIGHT,
+    MIN_PARTICIPANT_WEIGHT,
+};
 
-use rand::distr::weighted::WeightedIndex;
-use rand::distr::Distribution;
-use super::Store;
+use super::{choose_weighted_active_index, Store};
 
 /// In-memory storage. State is lost on restart and not shared across
 /// processes; intended for local development and tests.
@@ -98,22 +98,44 @@ impl Store for MemoryStore {
         Ok(())
     }
 
+    async fn update_participant(
+        &self,
+        session_id: &str,
+        participant_id: &str,
+        name: Option<String>,
+        pinned: Option<bool>,
+        weight: Option<u32>,
+    ) -> Result<Participant, AppError> {
+        let mut participants = self.participants.write().await;
+        let parts = participants
+            .get_mut(session_id)
+            .ok_or_else(|| AppError::NotFound("Session not found".into()))?;
+
+        let participant = parts
+            .iter_mut()
+            .find(|p| p.id == participant_id)
+            .ok_or_else(|| AppError::NotFound("Participant not found".into()))?;
+
+        if let Some(name) = name {
+            participant.name = name;
+        }
+        if let Some(pinned) = pinned {
+            participant.pinned = pinned;
+        }
+        if let Some(weight) = weight {
+            participant.weight = weight;
+        }
+
+        Ok(participant.clone())
+    }
+
     async fn spin(&self, session_id: &str) -> Result<SpinResult, AppError> {
         let mut participants = self.participants.write().await;
         let parts = participants
             .get_mut(session_id)
             .ok_or_else(|| AppError::NotFound("Session not found".into()))?;
 
-        let active: Vec<usize> = parts
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| !p.removed)
-            .map(|(i, _)| i)
-            .collect();
-
-        if active.is_empty() {
-            return Err(AppError::NoParticipantsLeft);
-        }
+        let picked_idx = choose_weighted_active_index(parts).ok_or(AppError::NoParticipantsLeft)?;
 
         // Snapshot before spin for history (auto granularity)
         let _before_snapshot = Snapshot {
@@ -124,19 +146,6 @@ impl Store for MemoryStore {
         };
 
         let spin_order = parts.iter().filter(|p| p.removed).count() as u32 + 1;
-
-        // Weighted choice (default 1.0). Fallback to uniform if sum==0 or error.
-        let weights: Vec<f32> = active.iter().map(|&i| parts[i].weight.unwrap_or(1.0)).collect();
-        let total: f32 = weights.iter().sum();
-        let picked_local: usize = if total > 0.0 {
-            match WeightedIndex::new(weights) {
-                Ok(dist) => dist.sample(&mut rand::rng()),
-                Err(_) => active.choose(&mut rand::rng()).copied().unwrap(),
-            }
-        } else {
-            active.choose(&mut rand::rng()).copied().unwrap()
-        };
-        let picked_idx = active[picked_local];
 
         parts[picked_idx].removed = true;
         parts[picked_idx].removed_at = Some(chrono::Utc::now());
@@ -149,7 +158,9 @@ impl Store for MemoryStore {
         let spin_action = Action {
             id: uuid::Uuid::new_v4().to_string(),
             session_id: session_id.to_string(),
-            kind: crate::models::ActionKind::Spin { picked_id: picked.id.clone() },
+            kind: crate::models::ActionKind::Spin {
+                picked_id: picked.id.clone(),
+            },
             timestamp: chrono::Utc::now(),
             actor: None,
         };
@@ -162,7 +173,7 @@ impl Store for MemoryStore {
             action_id: spin_action.id,
             participants: parts.clone(),
         };
-        let _ = self.create_snapshot(&snap).await;  // in real would use before snapshot
+        let _ = self.create_snapshot(&snap).await; // in real would use before snapshot
 
         drop(participants);
 
@@ -200,7 +211,7 @@ impl Store for MemoryStore {
             .find(|p| p.id == participant_id)
             .ok_or_else(|| AppError::NotFound("Participant not found".into()))?;
         if let Some(w) = weight {
-            p.weight = Some(w);
+            p.weight = (w.round() as u32).clamp(MIN_PARTICIPANT_WEIGHT, MAX_PARTICIPANT_WEIGHT);
         }
         if let Some(v) = visual {
             p.visual = Some(v);
@@ -234,12 +245,16 @@ impl Store for MemoryStore {
         Ok(())
     }
 
-    async fn get_snapshot(&self, session_id: &str, before_action_id: Option<&str>) -> Result<Option<Snapshot>, AppError> {
+    async fn get_snapshot(
+        &self,
+        session_id: &str,
+        before_action_id: Option<&str>,
+    ) -> Result<Option<Snapshot>, AppError> {
         let snaps = self.snapshots.read().await;
         let list = snaps.get(session_id).cloned().unwrap_or_default();
         if let Some(before) = before_action_id {
             // find latest with action_id <= before (assume lexical or id order for simplicity)
-            Ok(list.into_iter().filter(|s| s.action_id.as_str() <= before).last())
+            Ok(list.into_iter().rfind(|s| s.action_id.as_str() <= before))
         } else {
             Ok(list.into_iter().next_back())
         }

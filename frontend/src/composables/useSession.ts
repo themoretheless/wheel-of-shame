@@ -1,78 +1,13 @@
-import { ref } from 'vue'
-import type { Session, SpinResult } from '../types'
+import { ref, computed } from 'vue'
+import type { Session, Participant, SpinResult, ParticipantDraft } from '../types'
 import * as api from '../api/client'
 import { useWebSocket } from './useWebSocket'
-import { useToasts } from './useToasts'
-import { identityColor } from '../utils/identity'
-import { useHistory } from './useHistory'
-import { useRosterStore } from '../stores/roster'
-
-const { push: pushToast, update: updateToast, dismiss: dismissToast } = useToasts()
 
 const session = ref<Session | null>(null)
+const participants = ref<Participant[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
 const lastSpinResult = ref<SpinResult | null>(null)
-
-// History is now pure event log (roster is owner)
-const history = useHistory('')
-function setHistorySession(id: string) {
-  // Minimal patch for composable internal (no full refactor); typed access
-  ;(history as unknown as { _sessionId?: string })._sessionId = id
-}
-
-// --- Pinned recents (frecency-lite) ---
-//
-// Every session successfully loaded or created is remembered in localStorage as
-// {id, title, lastUsed}, deduped by id and capped, so a returning visitor can
-// hop back to a recent room without keeping its link around. The list is sorted
-// most-recent-first and surfaced through `recentSessions` for the App.vue
-// switcher chip. Storage failures (private mode, quota) are swallowed: recents
-// are a convenience, never load-bearing.
-export interface RecentSession {
-  id: string
-  title: string
-  lastUsed: number
-}
-
-const RECENTS_KEY = 'wheel-recent-sessions'
-const RECENTS_CAP = 8
-
-const recentSessions = ref<RecentSession[]>(readRecents())
-
-function readRecents(): RecentSession[] {
-  try {
-    const raw = localStorage.getItem(RECENTS_KEY)
-    if (!raw) return []
-    const parsed = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return []
-    return parsed
-      .filter(
-        (r): r is RecentSession =>
-          r != null &&
-          typeof r.id === 'string' &&
-          typeof r.title === 'string' &&
-          typeof r.lastUsed === 'number',
-      )
-      .sort((a, b) => b.lastUsed - a.lastUsed)
-      .slice(0, RECENTS_CAP)
-  } catch {
-    return []
-  }
-}
-
-function rememberSession(s: Session) {
-  const next: RecentSession[] = [
-    { id: s.id, title: s.title, lastUsed: Date.now() },
-    ...recentSessions.value.filter((r) => r.id !== s.id),
-  ].slice(0, RECENTS_CAP)
-  recentSessions.value = next
-  try {
-    localStorage.setItem(RECENTS_KEY, JSON.stringify(next))
-  } catch {
-    // Persisting recents is best-effort; ignore storage failures.
-  }
-}
 
 // Remote spin events (from other clients)
 const remoteSpinResult = ref<SpinResult | null>(null)
@@ -98,34 +33,6 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 // Bumped whenever a new connection is established intentionally (load/create)
 // or the session is torn down, invalidating any in-flight reconnect loop.
 let reconnectGen = 0
-// Handle to the sticky "reconnecting…" toast, raised on the first drop and
-// resolved (or dropped) once the socket comes back or we give up. Null when no
-// outage is being surfaced, which also gates the "Reconnected" success toast so
-// the very first connect on load never reports a reconnection.
-let reconnectToastId: number | null = null
-
-// Raise the sticky reconnect pill on the first drop of an outage; later attempts
-// reuse the same toast so a long outage doesn't stack a new pill each backoff.
-function showReconnectingToast() {
-  if (reconnectToastId !== null) return
-  reconnectToastId = pushToast('Connection lost, reconnecting…', 'warn', undefined, true)
-}
-
-// Flip the sticky reconnect pill to a timed success toast once the socket is
-// back. No-op if no outage was being surfaced (e.g. the initial connect).
-function resolveReconnectToast() {
-  if (reconnectToastId === null) return
-  updateToast(reconnectToastId, { message: 'Reconnected', kind: 'success', sticky: false })
-  reconnectToastId = null
-}
-
-// Tear the sticky reconnect pill down without a success note, e.g. when the
-// session is abandoned or the server is gone for good.
-function clearReconnectToast() {
-  if (reconnectToastId === null) return
-  dismissToast(reconnectToastId)
-  reconnectToastId = null
-}
 
 function cancelReconnect() {
   reconnectGen++
@@ -134,15 +41,10 @@ function cancelReconnect() {
     clearTimeout(reconnectTimer)
     reconnectTimer = null
   }
-  // An intentional reconnect (load/create/teardown) ends any outage we were
-  // surfacing, so retire the sticky pill rather than leaving it stuck.
-  clearReconnectToast()
 }
 
 function scheduleReconnect() {
   if (!session.value || reconnectTimer) return
-  // Surface the outage on the very first scheduled retry; reused for the rest.
-  showReconnectingToast()
   const gen = reconnectGen
   const backoff = Math.min(
     RECONNECT_BASE_MS * 2 ** reconnectAttempt,
@@ -150,7 +52,7 @@ function scheduleReconnect() {
   )
   const delay = backoff + Math.random() * RECONNECT_JITTER_MS
   reconnectAttempt++
-  if (import.meta.env.DEV) console.log(
+  console.log(
     `[ws] connection lost, reconnect attempt ${reconnectAttempt} in ${Math.round(delay)}ms`,
   )
   reconnectTimer = setTimeout(() => {
@@ -167,23 +69,21 @@ async function attemptReconnect(gen: number) {
     const data = await api.getSession(id)
     if (gen !== reconnectGen) return
     session.value = data.session
-    const r = useRosterStore()
-    r.setSessionId(data.session.id)
-    r.setParticipants(data.participants)
+    participants.value = data.participants
     error.value = null
     // Don't reset the backoff here: the REST re-fetch succeeding doesn't mean
     // the WebSocket will. Reset only once the socket actually opens (onOpen
     // below), so a server that serves HTTP but drops the WS handshake still
     // escalates the delay instead of looping at the base interval.
-    if (import.meta.env.DEV) console.log('[ws] session state re-synced, reopening websocket')
+    console.log('[ws] session state re-synced, reopening websocket')
     ws.connect(id)
   } catch (e: any) {
     if (gen !== reconnectGen) return
     if (e?.status === 404) {
-      if (import.meta.env.DEV) console.log('[ws] session no longer exists on server, giving up')
+      console.log('[ws] session no longer exists on server, giving up')
       cancelReconnect()
       session.value = null
-      useRosterStore().setParticipants([])
+      participants.value = []
       error.value =
         'Session no longer exists (the server may have restarted). Please create a new session.'
       return
@@ -197,9 +97,6 @@ ws.onOpen(() => {
   // A real open is the only success signal that clears the backoff, so the
   // next unexpected drop starts the delay sequence over from the base.
   reconnectAttempt = 0
-  // If an outage was being surfaced, flip its sticky pill to a "Reconnected"
-  // note; on the initial connect there is no pill, so this is a no-op.
-  resolveReconnectToast()
 })
 
 ws.onUnexpectedClose(() => {
@@ -209,32 +106,34 @@ ws.onUnexpectedClose(() => {
 ws.onMessage((event: any) => {
   switch (event.type) {
     case 'participant_added': {
-      const roster = useRosterStore()
-      const current = roster.participants || []
-      if (!current.some((p: any) => p.id === event.participant.id)) {
-        roster.setParticipants([...current, event.participant])
-        pushToast(
-          `${event.participant.name} joined`,
-          'info',
-          identityColor(event.participant.name),
-        )
+      const exists = participants.value.some((p) => p.id === event.participant.id)
+      if (!exists) {
+        participants.value.push(event.participant)
       }
       break
     }
     case 'participants_added': {
-      const roster = useRosterStore()
-      const current = roster.participants || []
-      const toAdd = event.participants.filter((p: any) => !current.some((ep: any) => ep.id === p.id))
-      if (toAdd.length > 0) {
-        roster.setParticipants([...current, ...toAdd])
-        pushToast(`${toAdd.length} name(s) added`, 'info')
+      for (const p of event.participants) {
+        const exists = participants.value.some((ep) => ep.id === p.id)
+        if (!exists) {
+          participants.value.push(p)
+        }
       }
       break
     }
     case 'participant_deleted': {
-      const roster = useRosterStore()
-      const current = (roster.participants || []).filter((p: any) => p.id !== event.participant_id)
-      roster.setParticipants(current)
+      participants.value = participants.value.filter(
+        (p) => p.id !== event.participant_id,
+      )
+      break
+    }
+    case 'participant_updated': {
+      const idx = participants.value.findIndex((p) => p.id === event.participant.id)
+      if (idx !== -1) {
+        participants.value[idx] = event.participant
+      } else {
+        participants.value.push(event.participant)
+      }
       break
     }
     case 'spin_result': {
@@ -252,49 +151,26 @@ ws.onMessage((event: any) => {
         picked: event.picked,
         remaining: event.remaining,
       }
-      // Note a remote spin's outcome; the local winner reveal modal already
-      // covers our own spins (those set suppressWsSpin above).
-      pushToast(
-        `${event.picked.name} was picked`,
-        'spin',
-        identityColor(event.picked.name),
-      )
       break
     }
     case 'session_reset': {
-      useRosterStore().setParticipants(event.participants || [])
+      participants.value = event.participants
       lastSpinResult.value = null
-      pushToast('Session reset', 'info')
-      break
-    }
-    case 'segment_updated': {
-      const roster = useRosterStore()
-      const current = roster.participants || []
-      const idx = current.findIndex((p: any) => p.id === event.participant.id)
-      if (idx !== -1) {
-        current[idx] = { ...current[idx], ...event.participant }
-        roster.setParticipants(current)
-      }
-      break
-    }
-    case 'action_logged': {
-      // optional: could push to a local history if exposed
-      break
-    }
-    case 'snapshot_restored': {
-      useRosterStore().setParticipants(event.participants || [])
-      lastSpinResult.value = null
-      pushToast('State restored from history', 'info')
       break
     }
   }
 })
 
 export function useSession() {
-  const roster = useRosterStore()
+  const activeParticipants = computed(() =>
+    participants.value.filter((p) => !p.removed),
+  )
 
-  // useSession no longer owns the roster list (fundamental change point 1).
-  // Roster data lives exclusively in rosterStore.
+  const removedParticipants = computed(() =>
+    participants.value
+      .filter((p) => p.removed)
+      .sort((a, b) => (a.spin_order ?? 0) - (b.spin_order ?? 0)),
+  )
 
   async function create(title: string) {
     loading.value = true
@@ -302,15 +178,7 @@ export function useSession() {
     try {
       cancelReconnect()
       session.value = await api.createSession(title)
-      roster.setSessionId(session.value.id)
-      roster.setParticipants([])
-      setHistorySession(session.value.id)
-      history.loadActions?.().then(() => {
-        if (history.actions?.value?.length) {
-          roster.replayEvents(history.actions.value)
-        }
-      })
-      rememberSession(session.value)
+      participants.value = []
       window.location.hash = `#/${session.value.id}`
       ws.connect(session.value.id)
     } catch (e: any) {
@@ -327,15 +195,7 @@ export function useSession() {
       cancelReconnect()
       const data = await api.getSession(id)
       session.value = data.session
-      roster.setSessionId(data.session.id)
-      roster.setParticipants(data.participants)
-      setHistorySession(data.session.id)
-      history.loadActions?.().then(() => {
-        if (history.actions?.value?.length) {
-          roster.replayEvents(history.actions.value)
-        }
-      })
-      rememberSession(data.session)
+      participants.value = data.participants
       ws.connect(id)
     } catch (e: any) {
       error.value = e.message
@@ -348,27 +208,141 @@ export function useSession() {
   async function addName(name: string) {
     if (!session.value) return
     error.value = null
-    await roster.addName(name).catch((e: any) => { error.value = e.message })
+    // Optimistic add (Linear-style): show a pending chip immediately, then
+    // reconcile its id once the server confirms. A unique temp id keeps the
+    // list/wheel :key stable and lets us find the row again on resolve.
+    const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    const temp: Participant = {
+      id: tempId,
+      session_id: session.value.id,
+      name,
+      removed: false,
+      pinned: false,
+      weight: 1,
+      pending: true,
+    }
+    participants.value.push(temp)
+    try {
+      const p = await api.addParticipant(session.value.id, name)
+      const tempIdx = participants.value.findIndex((ep) => ep.id === tempId)
+      // The WS broadcast may have already delivered the real participant.
+      const exists = participants.value.some((ep) => ep.id === p.id)
+      if (tempIdx !== -1) {
+        if (exists) {
+          // Real one arrived via WS; drop the temp placeholder.
+          participants.value.splice(tempIdx, 1)
+        } else {
+          // Reconcile in place so the row settles without a remount.
+          participants.value[tempIdx] = p
+        }
+      } else if (!exists) {
+        participants.value.push(p)
+      }
+    } catch (e: any) {
+      error.value = e.message
+      // Flag the temp row so the UI can shake it, then remove it shortly after.
+      const tempIdx = participants.value.findIndex((ep) => ep.id === tempId)
+      if (tempIdx !== -1) {
+        participants.value[tempIdx] = { ...temp, pending: false, error: true }
+        setTimeout(() => {
+          participants.value = participants.value.filter((ep) => ep.id !== tempId)
+        }, 600)
+      }
+    }
   }
 
   async function addNames(names: string[]) {
     if (!session.value) return
     error.value = null
-    await roster.addNames(names).catch((e: any) => { error.value = e.message })
+    try {
+      const newParticipants = await api.addParticipantsBatch(
+        session.value.id,
+        names,
+      )
+      for (const p of newParticipants) {
+        const exists = participants.value.some((ep) => ep.id === p.id)
+        if (!exists) {
+          participants.value.push(p)
+        }
+      }
+    } catch (e: any) {
+      error.value = e.message
+    }
+  }
+
+  async function addDrafts(drafts: ParticipantDraft[]) {
+    if (!session.value || drafts.length === 0) return
+    error.value = null
+    try {
+      const newParticipants = await api.addParticipantsBatch(
+        session.value.id,
+        drafts.map((draft) => draft.name),
+      )
+      for (const p of newParticipants) {
+        const exists = participants.value.some((ep) => ep.id === p.id)
+        if (!exists) {
+          participants.value.push(p)
+        }
+      }
+      for (let index = 0; index < newParticipants.length; index++) {
+        const draft = drafts[index]
+        if (!draft) continue
+        const patch: { pinned?: boolean; weight?: number } = {}
+        if (draft.pinned) patch.pinned = true
+        if (draft.weight && draft.weight !== 1) patch.weight = draft.weight
+        if (Object.keys(patch).length > 0) {
+          await updateParticipant(newParticipants[index].id, patch)
+        }
+      }
+    } catch (e: any) {
+      error.value = e.message
+    }
   }
 
   async function removeName(participantId: string) {
     if (!session.value) return
     error.value = null
-    await roster.removeName(participantId).catch((e: any) => { error.value = e.message })
+    try {
+      await api.deleteParticipant(session.value.id, participantId)
+      participants.value = participants.value.filter(
+        (p) => p.id !== participantId,
+      )
+    } catch (e: any) {
+      error.value = e.message
+    }
+  }
+
+  async function updateParticipant(
+    participantId: string,
+    patch: { name?: string; pinned?: boolean; weight?: number },
+  ) {
+    if (!session.value) return
+    error.value = null
+    const idx = participants.value.findIndex((p) => p.id === participantId)
+    const previous = idx === -1 ? null : { ...participants.value[idx] }
+    if (idx !== -1) {
+      participants.value[idx] = { ...participants.value[idx], ...patch }
+    }
+    try {
+      const participant = await api.updateParticipant(session.value.id, participantId, patch)
+      const nextIdx = participants.value.findIndex((p) => p.id === participant.id)
+      if (nextIdx !== -1) {
+        participants.value[nextIdx] = participant
+      } else {
+        participants.value.push(participant)
+      }
+    } catch (e: any) {
+      error.value = e.message
+      if (idx !== -1 && previous) {
+        participants.value[idx] = previous
+      }
+    }
   }
 
   async function doSpin(): Promise<SpinResult | null> {
     if (!session.value) return null
     error.value = null
     suppressWsSpin = true
-
-    // Note: rules now primarily handled in rosterStore + engine
     try {
       const result = await api.spin(session.value.id)
       lastSpinResult.value = result
@@ -380,33 +354,47 @@ export function useSession() {
   }
 
   function applySpinResult(result: SpinResult) {
-    roster.applySpinResult(result)
+    const idx = participants.value.findIndex((p) => p.id === result.picked.id)
+    if (idx !== -1) {
+      participants.value[idx] = result.picked
+    }
   }
 
   async function reset() {
     if (!session.value) return
     error.value = null
-    await roster.resetRoster().catch((e: any) => { error.value = e.message })
-    lastSpinResult.value = null
+    try {
+      await api.resetSession(session.value.id)
+      participants.value.forEach((p) => {
+        p.removed = false
+        p.removed_at = undefined
+        p.spin_order = undefined
+      })
+      lastSpinResult.value = null
+    } catch (e: any) {
+      error.value = e.message
+    }
   }
 
   return {
     session,
+    participants,
+    activeParticipants,
+    removedParticipants,
     loading,
     error,
     lastSpinResult,
     remoteSpinResult,
-    recentSessions,
     wsConnected: ws.connected,
-    history,
     create,
     load,
     addName,
     addNames,
+    addDrafts,
     removeName,
+    updateParticipant,
     doSpin,
     applySpinResult,
     reset,
-    setHistorySession,
   }
 }

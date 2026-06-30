@@ -1,8 +1,8 @@
 use axum::routing::{delete, get, patch, post};
 use axum::Router;
 
-use crate::store::AppState;
 use crate::handlers;
+use crate::store::AppState;
 
 pub fn create_router(state: AppState) -> Router {
     Router::new()
@@ -19,7 +19,7 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route(
             "/api/v1/sessions/{id}/participants/{pid}",
-            delete(handlers::delete_participant),
+            delete(handlers::delete_participant).patch(handlers::update_participant),
         )
         .route("/api/v1/sessions/{id}/spin", post(handlers::spin))
         .route("/api/v1/sessions/{id}/reset", post(handlers::reset_session))
@@ -34,7 +34,13 @@ pub fn create_router(state: AppState) -> Router {
             patch(handlers::update_participant_props),
         )
         .route("/api/v1/sessions/{id}/actions", get(handlers::list_actions))
-        .route("/api/v1/sessions/{id}/snapshot", get(handlers::get_snapshot))
-        .route("/api/v1/sessions/{id}/restore", post(handlers::restore_from_snapshot))
+        .route(
+            "/api/v1/sessions/{id}/snapshot",
+            get(handlers::get_snapshot),
+        )
+        .route(
+            "/api/v1/sessions/{id}/restore",
+            post(handlers::restore_from_snapshot),
+        )
         .with_state(state)
 }

@@ -168,7 +168,15 @@ export const useRosterStore = defineStore('roster', () => {
     if (!sid) return
     // Optimistic
     const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2)}`
-    const temp: Participant = { id: tempId, session_id: sid, name, removed: false, pending: true }
+    const temp: Participant = {
+      id: tempId,
+      session_id: sid,
+      name,
+      removed: false,
+      pinned: false,
+      weight: 1,
+      pending: true,
+    }
     participants.value.push(temp)
     syncEngine()
 

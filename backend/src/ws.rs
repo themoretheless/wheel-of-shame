@@ -18,6 +18,9 @@ pub enum SessionEvent {
     #[serde(rename = "participant_deleted")]
     ParticipantDeleted { participant_id: String },
 
+    #[serde(rename = "participant_updated")]
+    ParticipantUpdated { participant: Participant },
+
     #[serde(rename = "spin_result")]
     SpinResult {
         picked: Participant,

@@ -11,8 +11,9 @@ export interface Participant {
   removed: boolean
   removed_at?: string
   spin_order?: number
-  weight?: number
-  visual?: { color_override?: string; icon?: string }
+  pinned: boolean
+  weight: number
+  visual?: SegmentVisual
   // Client-only transient flags for optimistic add (Linear-style). `pending`
   // marks a temp row awaiting server confirmation; `error` marks one whose
   // POST failed and is about to be removed. Never sent by or to the server.
@@ -23,6 +24,12 @@ export interface Participant {
 export interface SegmentVisual {
   color_override?: string
   icon?: string
+}
+
+export interface ParticipantDraft {
+  name: string
+  pinned?: boolean
+  weight?: number
 }
 
 export interface Action {

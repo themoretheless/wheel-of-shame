@@ -5,12 +5,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rand::prelude::IndexedRandom;
 
 use crate::error::AppError;
 use crate::models::{Action, Participant, SegmentVisual, Session, Snapshot, SpinResult};
 
-use super::Store;
+use super::{choose_weighted_active_index, Store};
 
 #[derive(Clone)]
 pub struct YdbStore {
@@ -51,6 +50,8 @@ fn participant_from_row(mut row: ydb::Row) -> Result<Participant, ydb::YdbError>
     let removed_at: Option<std::time::SystemTime> =
         row.remove_field_by_name("removed_at")?.try_into()?;
     let spin_order: Option<u32> = row.remove_field_by_name("spin_order")?.try_into()?;
+    let pinned: Option<bool> = row.remove_field_by_name("pinned")?.try_into()?;
+    let weight: Option<u32> = row.remove_field_by_name("weight")?.try_into()?;
 
     Ok(Participant {
         id: id.unwrap_or_default(),
@@ -59,14 +60,15 @@ fn participant_from_row(mut row: ydb::Row) -> Result<Participant, ydb::YdbError>
         removed: removed.unwrap_or(false),
         removed_at: removed_at.map(chrono::DateTime::<chrono::Utc>::from),
         spin_order,
-        weight: None,
+        pinned: pinned.unwrap_or(false),
+        weight: weight.unwrap_or(1),
         visual: None,
     })
 }
 
 const SELECT_PARTICIPANTS: &str = "
     DECLARE $session_id AS Utf8;
-    SELECT session_id, id, name, removed, removed_at, spin_order
+    SELECT session_id, id, name, removed, removed_at, spin_order, pinned, weight
     FROM participants
     WHERE session_id = $session_id;
 ";
@@ -233,16 +235,20 @@ impl Store for YdbStore {
                                 DECLARE $id AS Utf8;
                                 DECLARE $name AS Utf8;
                                 DECLARE $removed AS Bool;
+                                DECLARE $pinned AS Bool;
+                                DECLARE $weight AS Uint32;
                                 UPSERT INTO participants
-                                    (session_id, id, name, removed, removed_at, spin_order)
-                                VALUES ($session_id, $id, $name, $removed, NULL, NULL);
+                                    (session_id, id, name, removed, removed_at, spin_order, pinned, weight)
+                                VALUES ($session_id, $id, $name, $removed, NULL, NULL, $pinned, $weight);
                                 ",
                             )
                             .with_params(ydb::ydb_params!(
                                 "$session_id" => session_id.clone(),
                                 "$id" => p.id.clone(),
                                 "$name" => p.name.clone(),
-                                "$removed" => p.removed
+                                "$removed" => p.removed,
+                                "$pinned" => p.pinned,
+                                "$weight" => p.weight
                             )),
                         )
                         .await?;
@@ -315,6 +321,74 @@ impl Store for YdbStore {
         outcome.into_result()
     }
 
+    async fn update_participant(
+        &self,
+        session_id: &str,
+        participant_id: &str,
+        name: Option<String>,
+        pinned: Option<bool>,
+        weight: Option<u32>,
+    ) -> Result<Participant, AppError> {
+        let session_id = session_id.to_string();
+        let participant_id = participant_id.to_string();
+        let outcome = self
+            .table_client()
+            .retry_transaction(|mut t| {
+                let session_id = session_id.clone();
+                let participant_id = participant_id.clone();
+                let name = name.clone();
+                async move {
+                    if !Self::session_exists_in_tx(&mut t, &session_id).await? {
+                        return Ok(TxOutcome::SessionNotFound);
+                    }
+                    let parts = Self::participants_in_tx(&mut t, &session_id).await?;
+                    let Some(mut participant) = parts.into_iter().find(|p| p.id == participant_id)
+                    else {
+                        return Ok(TxOutcome::ParticipantNotFound);
+                    };
+                    if let Some(name) = name {
+                        participant.name = name;
+                    }
+                    if let Some(pinned) = pinned {
+                        participant.pinned = pinned;
+                    }
+                    if let Some(weight) = weight {
+                        participant.weight = weight;
+                    }
+
+                    t.query(
+                        ydb::Query::new(
+                            "
+                            DECLARE $session_id AS Utf8;
+                            DECLARE $id AS Utf8;
+                            DECLARE $name AS Utf8;
+                            DECLARE $pinned AS Bool;
+                            DECLARE $weight AS Uint32;
+                            UPDATE participants
+                            SET name = $name,
+                                pinned = $pinned,
+                                weight = $weight
+                            WHERE session_id = $session_id AND id = $id;
+                            ",
+                        )
+                        .with_params(ydb::ydb_params!(
+                            "$session_id" => session_id,
+                            "$id" => participant_id,
+                            "$name" => participant.name.clone(),
+                            "$pinned" => participant.pinned,
+                            "$weight" => participant.weight
+                        )),
+                    )
+                    .await?;
+                    t.commit().await?;
+                    Ok(TxOutcome::Ok(participant))
+                }
+            })
+            .await
+            .map_err(ydb_err)?;
+        outcome.into_result()
+    }
+
     async fn spin(&self, session_id: &str) -> Result<SpinResult, AppError> {
         let session_id = session_id.to_string();
         let outcome = self
@@ -327,18 +401,16 @@ impl Store for YdbStore {
                     }
                     let parts = Self::participants_in_tx(&mut t, &session_id).await?;
 
-                    let active: Vec<&Participant> =
-                        parts.iter().filter(|p| !p.removed).collect();
-                    if active.is_empty() {
+                    let Some(picked_idx) = choose_weighted_active_index(&parts) else {
                         return Ok(TxOutcome::NoActiveParticipants);
-                    }
+                    };
 
                     let spin_order = parts.iter().filter(|p| p.removed).count() as u32 + 1;
-                    let mut picked = (*active.choose(&mut rand::rng()).unwrap()).clone();
+                    let mut picked = parts[picked_idx].clone();
                     picked.removed = true;
                     picked.removed_at = Some(chrono::Utc::now());
                     picked.spin_order = Some(spin_order);
-                    let remaining = active.len() - 1;
+                    let remaining = parts.iter().filter(|p| !p.removed).count() - 1;
 
                     t.query(
                         ydb::Query::new(
@@ -414,20 +486,40 @@ impl Store for YdbStore {
         _weight: Option<f32>,
         _visual: Option<SegmentVisual>,
     ) -> Result<Participant, AppError> {
-        Err(AppError::Internal("update_participant_props not yet in ydb (memory first)".into()))
+        Err(AppError::Internal(
+            "update_participant_props not yet in ydb (memory first)".into(),
+        ))
     }
 
-    async fn append_action(&self, _action: &Action) -> Result<(), AppError> { Ok(()) }
-    async fn list_actions(&self, _session_id: &str, _limit: usize) -> Result<Vec<Action>, AppError> { Ok(vec![]) }
+    async fn append_action(&self, _action: &Action) -> Result<(), AppError> {
+        Ok(())
+    }
+    async fn list_actions(
+        &self,
+        _session_id: &str,
+        _limit: usize,
+    ) -> Result<Vec<Action>, AppError> {
+        Ok(vec![])
+    }
 
-    async fn create_snapshot(&self, _snapshot: &Snapshot) -> Result<(), AppError> { Ok(()) }
-    async fn get_snapshot(&self, _session_id: &str, _before_action_id: Option<&str>) -> Result<Option<Snapshot>, AppError> { Ok(None) }
+    async fn create_snapshot(&self, _snapshot: &Snapshot) -> Result<(), AppError> {
+        Ok(())
+    }
+    async fn get_snapshot(
+        &self,
+        _session_id: &str,
+        _before_action_id: Option<&str>,
+    ) -> Result<Option<Snapshot>, AppError> {
+        Ok(None)
+    }
 
     async fn restore_from_snapshot(
         &self,
         _session_id: &str,
         _participants: &[Participant],
     ) -> Result<Vec<Participant>, AppError> {
-        Err(AppError::Internal("restore_from_snapshot not yet in ydb".into()))
+        Err(AppError::Internal(
+            "restore_from_snapshot not yet in ydb".into(),
+        ))
     }
 }
