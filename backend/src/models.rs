@@ -12,6 +12,14 @@ pub struct Session {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SegmentVisual {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color_override: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Participant {
     pub id: String,
@@ -23,7 +31,10 @@ pub struct Participant {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spin_order: Option<u32>,
     pub pinned: bool,
-    pub weight: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weight: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visual: Option<SegmentVisual>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,12 +85,44 @@ impl Participant {
             removed_at: None,
             spin_order: None,
             pinned: false,
-            weight: MIN_PARTICIPANT_WEIGHT,
+            weight: Some(MIN_PARTICIPANT_WEIGHT as f32),
+            visual: None,
         }
     }
 
-    pub fn effective_weight(&self) -> u32 {
+    pub fn effective_weight(&self) -> f32 {
         self.weight
-            .clamp(MIN_PARTICIPANT_WEIGHT, MAX_PARTICIPANT_WEIGHT)
+            .unwrap_or(MIN_PARTICIPANT_WEIGHT as f32)
+            .clamp(0.1, 10.0)
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Action {
+    pub id: String,
+    pub session_id: String,
+    pub kind: ActionKind,
+    pub timestamp: DateTime<Utc>,
+    pub actor: Option<String>, // None for now (no auth)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "payload")]
+pub enum ActionKind {
+    Add { name: String },
+    Remove { id: String },
+    Spin { picked_id: String },
+    Reset,
+    UpdateWeight { id: String, weight: f32 },
+    UpdateVisual { id: String, visual: SegmentVisual },
+    Reorder { from: usize, to: usize },
+    SnapshotRestored { snapshot_id: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Snapshot {
+    pub id: String,
+    pub session_id: String,
+    pub action_id: String, // the action after which this snapshot is valid
+    pub participants: Vec<Participant>,
 }

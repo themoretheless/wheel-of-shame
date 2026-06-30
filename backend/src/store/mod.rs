@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use rand::RngExt;
 
 use crate::error::AppError;
-use crate::models::{Participant, Session, SpinResult};
+use crate::models::{Action, Participant, SegmentVisual, Session, Snapshot, SpinResult};
 use crate::ws::Hub;
 
 mod memory;
@@ -66,21 +66,45 @@ pub trait Store: Send + Sync {
     /// Restore all participants of a session to the active state.
     /// Returns the restored participant list.
     async fn reset_session(&self, session_id: &str) -> Result<Vec<Participant>, AppError>;
+
+    /// Update weight and/or visual for one participant (idempotent, additive).
+    async fn update_participant_props(
+        &self,
+        session_id: &str,
+        participant_id: &str,
+        weight: Option<f32>,
+        visual: Option<SegmentVisual>,
+    ) -> Result<Participant, AppError>;
+
+    async fn append_action(&self, action: &Action) -> Result<(), AppError>;
+    async fn list_actions(&self, session_id: &str, limit: usize) -> Result<Vec<Action>, AppError>;
+
+    async fn create_snapshot(&self, snapshot: &Snapshot) -> Result<(), AppError>;
+    /// Returns the snapshot at or immediately before the given action (or latest if None).
+    async fn get_snapshot(&self, session_id: &str, before_action_id: Option<&str>) -> Result<Option<Snapshot>, AppError>;
+
+    /// Replace the entire participant list for a session (used by snapshot restore for undo).
+    /// Returns the new list. Does not append action (caller does).
+    async fn restore_from_snapshot(
+        &self,
+        session_id: &str,
+        participants: &[Participant],
+    ) -> Result<Vec<Participant>, AppError>;
 }
 
 pub(crate) fn choose_weighted_active_index(parts: &[Participant]) -> Option<usize> {
-    let active: Vec<(usize, u32)> = parts
+    let active: Vec<(usize, f32)> = parts
         .iter()
         .enumerate()
         .filter(|(_, p)| !p.removed)
         .map(|(idx, p)| (idx, p.effective_weight()))
         .collect();
-    let total_weight: u32 = active.iter().map(|(_, weight)| *weight).sum();
-    if total_weight == 0 {
+    let total_weight: f32 = active.iter().map(|(_, weight)| *weight).sum();
+    if total_weight <= 0.0 {
         return None;
     }
 
-    let mut ticket = rand::rng().random_range(0..total_weight);
+    let mut ticket = rand::rng().random_range(0.0..total_weight);
     for (idx, weight) in active {
         if ticket < weight {
             return Some(idx);

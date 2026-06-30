@@ -7,7 +7,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::error::AppError;
-use crate::models::{Participant, Session, SpinResult};
+use crate::models::{Action, Participant, SegmentVisual, Session, Snapshot, SpinResult};
 
 use super::{choose_weighted_active_index, Store};
 
@@ -61,7 +61,8 @@ fn participant_from_row(mut row: ydb::Row) -> Result<Participant, ydb::YdbError>
         removed_at: removed_at.map(chrono::DateTime::<chrono::Utc>::from),
         spin_order,
         pinned: pinned.unwrap_or(false),
-        weight: weight.unwrap_or(1),
+        weight: Some(weight.unwrap_or(1) as f32),
+        visual: None,
     })
 }
 
@@ -247,7 +248,7 @@ impl Store for YdbStore {
                                 "$name" => p.name.clone(),
                                 "$removed" => p.removed,
                                 "$pinned" => p.pinned,
-                                "$weight" => p.weight
+                                "$weight" => p.weight.unwrap_or(1.0).round() as u32
                             )),
                         )
                         .await?;
@@ -352,7 +353,7 @@ impl Store for YdbStore {
                         participant.pinned = pinned;
                     }
                     if let Some(weight) = weight {
-                        participant.weight = weight;
+                        participant.weight = Some(weight as f32);
                     }
 
                     t.query(
@@ -375,7 +376,7 @@ impl Store for YdbStore {
                             "$id" => participant_id,
                             "$name" => participant.name.clone(),
                             "$pinned" => participant.pinned,
-                            "$weight" => participant.weight
+                            "$weight" => participant.weight.unwrap_or(1.0).round() as u32
                         )),
                     )
                     .await?;
@@ -476,5 +477,29 @@ impl Store for YdbStore {
             .await
             .map_err(ydb_err)?;
         outcome.into_result()
+    }
+
+    async fn update_participant_props(
+        &self,
+        _session_id: &str,
+        _participant_id: &str,
+        _weight: Option<f32>,
+        _visual: Option<SegmentVisual>,
+    ) -> Result<Participant, AppError> {
+        Err(AppError::Internal("update_participant_props not yet in ydb (memory first)".into()))
+    }
+
+    async fn append_action(&self, _action: &Action) -> Result<(), AppError> { Ok(()) }
+    async fn list_actions(&self, _session_id: &str, _limit: usize) -> Result<Vec<Action>, AppError> { Ok(vec![]) }
+
+    async fn create_snapshot(&self, _snapshot: &Snapshot) -> Result<(), AppError> { Ok(()) }
+    async fn get_snapshot(&self, _session_id: &str, _before_action_id: Option<&str>) -> Result<Option<Snapshot>, AppError> { Ok(None) }
+
+    async fn restore_from_snapshot(
+        &self,
+        _session_id: &str,
+        _participants: &[Participant],
+    ) -> Result<Vec<Participant>, AppError> {
+        Err(AppError::Internal("restore_from_snapshot not yet in ydb".into()))
     }
 }

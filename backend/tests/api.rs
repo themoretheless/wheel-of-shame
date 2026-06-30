@@ -354,12 +354,12 @@ async fn update_participant_settings() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["name"], "Ada");
     assert_eq!(body["pinned"], true);
-    assert_eq!(body["weight"], 4);
+    assert_eq!(body["weight"], 4.0);
 
     let parts = get_participants(&app, &id).await;
     assert_eq!(parts[0]["name"], "Ada");
     assert_eq!(parts[0]["pinned"], true);
-    assert_eq!(parts[0]["weight"], 4);
+    assert_eq!(parts[0]["weight"], 4.0);
 
     let (status, body) = send(
         &app,

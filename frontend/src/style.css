@@ -17,6 +17,73 @@ body {
   min-height: 100vh;
 }
 
+/* Theming. Driven by [data-theme] (set on <html> by the ui store) so toggling a
+   theme never clobbers other root classes; the legacy .high-contrast class is
+   kept as an alias for backward compatibility. */
+.high-contrast,
+[data-theme='high-contrast'] {
+  --bg: #000;
+  --fg: #fff;
+  background: #000;
+  color: #fff;
+}
+.high-contrast kbd,
+[data-theme='high-contrast'] kbd {
+  background: #fff;
+  color: #000;
+  border-color: #000;
+}
+
+/* Screen-reader-only utility: present in the a11y tree, invisible on screen.
+   Used by the spin announcer, roster odds, and other narration spans. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+/* ============================================================
+   Focus system: one keyboard-only ring shared by every
+   interactive surface (dock, roster, history, inspector,
+   swatches, inputs). :focus-visible keeps it off mouse clicks;
+   outline (not box-shadow) is used so the ring is never clipped
+   by the dock's overflow:hidden. Components that used to
+   `outline: none` on :focus now drop that line and inherit the
+   global rules below, so the ring is consistent app-wide.
+   ============================================================ */
+:root {
+  /* --accent flows through --theme-accent, which the color picker writes onto
+     <html> (ui.updateThemeColor). So picking a color now actually retints the
+     focus ring and anything else bound to var(--accent), with the brand teal as
+     the fallback when no custom color is set. */
+  --accent: var(--theme-accent, #4ECDC4);
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 2px;
+}
+
+:focus-visible {
+  outline: var(--focus-ring-width) solid var(--accent);
+  outline-offset: var(--focus-ring-offset);
+}
+
+/* Mouse / touch focus stays ringless; only keyboard focus shows the ring. */
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* High-contrast mode: a thicker, pure-white ring for maximum legibility. */
+.high-contrast :focus-visible,
+[data-theme='high-contrast'] :focus-visible {
+  outline-width: 3px;
+  outline-color: #fff;
+}
+
 /* Keycap-style hint chip (e.g. the "Space to spin" shortcut). */
 kbd {
   display: inline-block;

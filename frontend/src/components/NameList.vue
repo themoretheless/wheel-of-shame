@@ -2,20 +2,36 @@
 import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
 import type { Participant, ParticipantDraft } from '../types'
 import { identityColor } from '../utils/identity'
+import { computeAngles } from '../utils/wheel'
 
 // First visible character, upper-cased, for the round identity token.
 function initialOf(name: string): string {
   return (name.trim()[0] ?? '?').toUpperCase()
 }
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   active: Participant[]
   removed: Participant[]
-  soundEnabled: boolean
-  soundIntensity: number
-  themePreset: 'classic' | 'arcade' | 'minimal'
-  spectatorMode: boolean
-}>()
+  soundEnabled?: boolean
+  soundIntensity?: number
+  themePreset?: 'classic' | 'arcade' | 'minimal'
+  spectatorMode?: boolean
+  tickingId?: string | null
+  comments?: Record<string, string[]>
+  lastPickedId?: string | null
+  preventRepeat?: boolean
+  preparedSegments?: Array<{ id: string; angle: number; weight: number }>
+}>(), {
+  soundEnabled: true,
+  soundIntensity: 1,
+  themePreset: 'classic',
+  spectatorMode: false,
+  tickingId: null,
+  comments: () => ({}),
+  lastPickedId: null,
+  preventRepeat: false,
+  preparedSegments: () => [],
+})
 
 const emit = defineEmits<{
   (e: 'add', name: string): void
@@ -28,9 +44,12 @@ const emit = defineEmits<{
   (e: 'update:sound-intensity', value: number): void
   (e: 'update:theme-preset', value: 'classic' | 'arcade' | 'minimal'): void
   (e: 'update:spectator-mode', value: boolean): void
+  (e: 'hover-name', id: string | null): void
+  (e: 'reorder', from: number, to: number): void
 }>()
 
 const nameInput = ref('')
+const nameInputEl = ref<HTMLInputElement | null>(null)
 const searchQuery = ref('')
 const bulkOpen = ref(false)
 const bulkText = ref('')
@@ -46,6 +65,12 @@ const undoAction = ref<UndoAction | null>(null)
 const editingId = ref<string | null>(null)
 const editingName = ref('')
 let copyStatusTimer: ReturnType<typeof setTimeout> | undefined
+
+function focusInput() {
+  nameInputEl.value?.focus()
+}
+
+defineExpose({ focusInput })
 
 function parseNames(value: string): string[] {
   return value
@@ -204,6 +229,26 @@ const totalWeight = computed(() =>
   props.active.reduce((sum, participant) => sum + weightOf(participant), 0),
 )
 const pinnedCount = computed(() => props.active.filter((participant) => participant.pinned).length)
+
+const oddsById = computed(() => {
+  const map: Record<string, number> = {}
+  if (!props.active.length) return map
+
+  const angles =
+    props.preparedSegments.length === props.active.length
+      ? props.preparedSegments.map((segment) => segment.angle)
+      : computeAngles(props.active)
+  const total = angles.reduce((sum, angle) => sum + angle, 0) || Math.PI * 2
+
+  props.active.forEach((participant, index) => {
+    map[participant.id] = ((angles[index] || 0) / total) * 100
+  })
+  return map
+})
+
+function getOdds(participant: Participant): number {
+  return oddsById.value[participant.id] ?? (props.active.length ? 100 / props.active.length : 0)
+}
 
 const nextOdds = computed(() => {
   if (props.active.length === 0) return '0%'
@@ -525,6 +570,7 @@ onBeforeUnmount(() => {
 
     <div class="input-group">
       <input
+        ref="nameInputEl"
         v-model="nameInput"
         @keyup.enter="addName"
         placeholder="Name, comma list, or pasted rows"
@@ -637,7 +683,20 @@ onBeforeUnmount(() => {
           v-for="p in activeFiltered"
           :key="p.id"
           class="participant-item"
-          :class="{ pending: p.pending, error: p.error, pinned: p.pinned, weighted: weightOf(p) > 1 }"
+          :class="{
+            pending: p.pending,
+            error: p.error,
+            pinned: p.pinned,
+            weighted: weightOf(p) > 1,
+            ticking: tickingId === p.id,
+          }"
+          :style="{
+            '--odds-width': `${getOdds(p)}%`,
+            '--odds-color': identityColor(p.name),
+            '--tick-color': identityColor(p.name),
+          }"
+          @mouseenter="emit('hover-name', p.id)"
+          @mouseleave="emit('hover-name', null)"
         >
           <span class="name-cell">
             <span class="identity-token" :style="{ background: identityColor(p.name) }">{{
@@ -661,8 +720,17 @@ onBeforeUnmount(() => {
             >
               {{ p.name }}
             </button>
+            <span v-if="(comments?.[p.id]?.length ?? 0) > 0" class="comment-badge">
+              {{ comments?.[p.id]?.length }}
+            </span>
+            <span v-if="preventRepeat && lastPickedId === p.id" class="last-badge">
+              last
+            </span>
           </span>
           <span class="row-tools">
+            <span class="odds-pct" :title="`${p.name} has ${getOdds(p).toFixed(1)}% next odds`">
+              {{ getOdds(p).toFixed(0) }}%
+            </span>
             <button
               class="mini-btn"
               :class="{ active: p.pinned }"
@@ -1232,6 +1300,7 @@ ol {
 }
 
 .participant-item {
+  position: relative;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -1242,6 +1311,39 @@ ol {
   border-radius: 8px;
   margin-bottom: 6px;
   background: rgba(255, 255, 255, 0.055);
+  overflow: hidden;
+  transition:
+    transform 0.18s ease-out,
+    border-color 0.18s ease-out,
+    background 0.18s ease-out,
+    box-shadow 0.18s ease-out;
+}
+
+.participant-item::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--odds-width, 0%);
+  border-radius: inherit;
+  background: var(--odds-color, transparent);
+  opacity: 0.13;
+  pointer-events: none;
+  transition: width 0.28s ease;
+}
+
+.participant-item.picked::before,
+.participant-item.pending::before,
+.participant-item.error::before {
+  display: none;
+}
+
+.participant-item.ticking {
+  transform: scale(1.025);
+  border-color: var(--tick-color, var(--accent));
+  background:
+    color-mix(in srgb, var(--tick-color, var(--accent)) 18%, rgba(255, 255, 255, 0.055)),
+    rgba(255, 255, 255, 0.055);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--tick-color, var(--accent)) 60%, transparent);
 }
 
 .participant-item.pinned {
@@ -1256,6 +1358,7 @@ ol {
 }
 
 .name-cell {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 9px;
@@ -1321,10 +1424,40 @@ ol {
 }
 
 .row-tools {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 4px;
   flex: none;
+}
+
+.comment-badge,
+.last-badge {
+  flex: none;
+  padding: 2px 5px;
+  border-radius: 5px;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.comment-badge {
+  background: rgba(255, 255, 255, 0.08);
+  color: #b8c4c7;
+}
+
+.last-badge {
+  background: rgba(255, 107, 107, 0.18);
+  color: #ffaaa3;
+}
+
+.odds-pct {
+  min-width: 34px;
+  color: var(--odds-color, #95a5a6);
+  font-size: 11px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 .mini-btn {

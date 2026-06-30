@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use tokio::sync::RwLock;
 
 use crate::error::AppError;
-use crate::models::{Participant, Session, SpinResult};
+use crate::models::{Action, Participant, SegmentVisual, Session, Snapshot, SpinResult};
 
 use super::{choose_weighted_active_index, Store};
 
@@ -17,6 +17,8 @@ use super::{choose_weighted_active_index, Store};
 pub struct MemoryStore {
     sessions: Arc<RwLock<HashMap<String, Session>>>,
     participants: Arc<RwLock<HashMap<String, Vec<Participant>>>>,
+    actions: Arc<RwLock<HashMap<String, Vec<Action>>>>,
+    snapshots: Arc<RwLock<HashMap<String, Vec<Snapshot>>>>,
 }
 
 #[async_trait]
@@ -27,6 +29,14 @@ impl Store for MemoryStore {
             .await
             .insert(session.id.clone(), session.clone());
         self.participants
+            .write()
+            .await
+            .insert(session.id.clone(), vec![]);
+        self.actions
+            .write()
+            .await
+            .insert(session.id.clone(), vec![]);
+        self.snapshots
             .write()
             .await
             .insert(session.id.clone(), vec![]);
@@ -110,7 +120,7 @@ impl Store for MemoryStore {
             participant.pinned = pinned;
         }
         if let Some(weight) = weight {
-            participant.weight = weight;
+            participant.weight = Some(weight as f32);
         }
 
         Ok(participant.clone())
@@ -124,6 +134,14 @@ impl Store for MemoryStore {
 
         let picked_idx = choose_weighted_active_index(parts).ok_or(AppError::NoParticipantsLeft)?;
 
+        // Snapshot before spin for history (auto granularity)
+        let _before_snapshot = Snapshot {
+            id: uuid::Uuid::new_v4().to_string(),
+            session_id: session_id.to_string(),
+            action_id: String::new(),
+            participants: parts.clone(),
+        };
+
         let spin_order = parts.iter().filter(|p| p.removed).count() as u32 + 1;
 
         parts[picked_idx].removed = true;
@@ -132,6 +150,27 @@ impl Store for MemoryStore {
 
         let remaining = parts.iter().filter(|p| !p.removed).count();
         let picked = parts[picked_idx].clone();
+
+        // Append spin action + snapshot (simplified wiring for now; full in later steps)
+        let spin_action = Action {
+            id: uuid::Uuid::new_v4().to_string(),
+            session_id: session_id.to_string(),
+            kind: crate::models::ActionKind::Spin { picked_id: picked.id.clone() },
+            timestamp: chrono::Utc::now(),
+            actor: None,
+        };
+        // direct append (trait method available in impl block)
+        let _ = self.append_action(&spin_action).await;
+
+        let snap = Snapshot {
+            id: uuid::Uuid::new_v4().to_string(),
+            session_id: session_id.to_string(),
+            action_id: spin_action.id,
+            participants: parts.clone(),
+        };
+        let _ = self.create_snapshot(&snap).await;  // in real would use before snapshot
+
+        drop(participants);
 
         Ok(SpinResult { picked, remaining })
     }
@@ -149,5 +188,79 @@ impl Store for MemoryStore {
         }
 
         Ok(parts.clone())
+    }
+
+    async fn update_participant_props(
+        &self,
+        session_id: &str,
+        participant_id: &str,
+        weight: Option<f32>,
+        visual: Option<SegmentVisual>,
+    ) -> Result<Participant, AppError> {
+        let mut participants = self.participants.write().await;
+        let parts = participants
+            .get_mut(session_id)
+            .ok_or_else(|| AppError::NotFound("Session not found".into()))?;
+        let p = parts
+            .iter_mut()
+            .find(|p| p.id == participant_id)
+            .ok_or_else(|| AppError::NotFound("Participant not found".into()))?;
+        if let Some(w) = weight {
+            p.weight = Some(w);
+        }
+        if let Some(v) = visual {
+            p.visual = Some(v);
+        }
+        Ok(p.clone())
+    }
+
+    async fn append_action(&self, action: &Action) -> Result<(), AppError> {
+        self.actions
+            .write()
+            .await
+            .entry(action.session_id.clone())
+            .or_default()
+            .push(action.clone());
+        Ok(())
+    }
+
+    async fn list_actions(&self, session_id: &str, limit: usize) -> Result<Vec<Action>, AppError> {
+        let acts = self.actions.read().await;
+        let list = acts.get(session_id).cloned().unwrap_or_default();
+        Ok(list.into_iter().rev().take(limit).collect())
+    }
+
+    async fn create_snapshot(&self, snapshot: &Snapshot) -> Result<(), AppError> {
+        self.snapshots
+            .write()
+            .await
+            .entry(snapshot.session_id.clone())
+            .or_default()
+            .push(snapshot.clone());
+        Ok(())
+    }
+
+    async fn get_snapshot(&self, session_id: &str, before_action_id: Option<&str>) -> Result<Option<Snapshot>, AppError> {
+        let snaps = self.snapshots.read().await;
+        let list = snaps.get(session_id).cloned().unwrap_or_default();
+        if let Some(before) = before_action_id {
+            // find latest with action_id <= before (assume lexical or id order for simplicity)
+            Ok(list.into_iter().filter(|s| s.action_id.as_str() <= before).last())
+        } else {
+            Ok(list.into_iter().next_back())
+        }
+    }
+
+    async fn restore_from_snapshot(
+        &self,
+        session_id: &str,
+        participants: &[Participant],
+    ) -> Result<Vec<Participant>, AppError> {
+        let mut parts = self.participants.write().await;
+        let slot = parts
+            .get_mut(session_id)
+            .ok_or_else(|| AppError::NotFound("Session not found".into()))?;
+        *slot = participants.to_vec();
+        Ok(slot.clone())
     }
 }

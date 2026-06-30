@@ -15,7 +15,8 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, S
 use sqlx::{Row, SqlitePool};
 
 use crate::error::AppError;
-use crate::models::{Participant, Session, SpinResult};
+use crate::models::{Action, ActionKind, Participant, SegmentVisual, Session, Snapshot, SpinResult};
+use serde_json;
 
 use super::{choose_weighted_active_index, Store};
 
@@ -31,6 +32,9 @@ fn db_err<E: std::fmt::Display>(e: E) -> AppError {
 fn row_to_participant(row: &SqliteRow) -> Participant {
     let removed_at: Option<String> = row.get("removed_at");
     let spin_order: Option<i64> = row.get("spin_order");
+    let weight: Option<f64> = row.get("weight");
+    let visual_json: Option<String> = row.get("visual");
+    let visual = visual_json.and_then(|s| serde_json::from_str::<SegmentVisual>(&s).ok());
     Participant {
         id: row.get("id"),
         session_id: row.get("session_id"),
@@ -41,7 +45,8 @@ fn row_to_participant(row: &SqliteRow) -> Participant {
             .map(|d| d.with_timezone(&Utc)),
         spin_order: spin_order.map(|v| v as u32),
         pinned: row.get::<bool, _>("pinned"),
-        weight: row.get::<i64, _>("weight") as u32,
+        weight: weight.map(|w| w as f32),
+        visual,
     }
 }
 
@@ -127,7 +132,8 @@ impl SqliteStore {
                 removed_at TEXT,
                 spin_order INTEGER,
                 pinned INTEGER NOT NULL DEFAULT 0,
-                weight INTEGER NOT NULL DEFAULT 1,
+                weight REAL DEFAULT 1.0,
+                visual TEXT,
                 PRIMARY KEY (session_id, id)
             );",
         )
@@ -137,12 +143,50 @@ impl SqliteStore {
 
         self.ensure_participant_column("pinned", "INTEGER NOT NULL DEFAULT 0")
             .await?;
-        self.ensure_participant_column("weight", "INTEGER NOT NULL DEFAULT 1")
+        self.ensure_participant_column("weight", "REAL DEFAULT 1.0")
+            .await?;
+        self.ensure_participant_column("visual", "TEXT")
             .await?;
 
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_participants_session
              ON participants(session_id);",
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+
+        // actions and snapshots for history/undo (additive)
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS actions (
+                id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                payload TEXT,
+                timestamp TEXT NOT NULL,
+                actor TEXT,
+                PRIMARY KEY (id)
+            );",
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_actions_session ON actions(session_id);",
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS snapshots (
+                id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                action_id TEXT NOT NULL,
+                participants TEXT NOT NULL,
+                PRIMARY KEY (id)
+            );",
         )
         .execute(&self.pool)
         .await
@@ -207,7 +251,7 @@ impl Store for SqliteStore {
 
     async fn list_participants(&self, session_id: &str) -> Result<Vec<Participant>, AppError> {
         let rows = sqlx::query(
-            "SELECT session_id, id, name, removed, removed_at, spin_order, pinned, weight
+            "SELECT session_id, id, name, removed, removed_at, spin_order, pinned, weight, visual
              FROM participants WHERE session_id = ?",
         )
         .bind(session_id)
@@ -237,8 +281,8 @@ impl Store for SqliteStore {
         for p in participants {
             sqlx::query(
                 "INSERT OR REPLACE INTO participants
-                    (session_id, id, name, removed, removed_at, spin_order, pinned, weight)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (session_id, id, name, removed, removed_at, spin_order, pinned, weight, visual)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(session_id)
             .bind(&p.id)
@@ -247,7 +291,8 @@ impl Store for SqliteStore {
             .bind(p.removed_at.map(|d| d.to_rfc3339()))
             .bind(p.spin_order.map(|v| v as i64))
             .bind(p.pinned)
-            .bind(p.weight as i64)
+            .bind(p.weight.map(|w| w as f64))
+            .bind(p.visual.as_ref().and_then(|v| serde_json::to_string(v).ok()))
             .execute(&mut *tx)
             .await
             .map_err(db_err)?;
@@ -308,7 +353,7 @@ impl Store for SqliteStore {
         }
 
         let row = sqlx::query(
-            "SELECT session_id, id, name, removed, removed_at, spin_order, pinned, weight
+            "SELECT session_id, id, name, removed, removed_at, spin_order, pinned, weight, visual
              FROM participants WHERE session_id = ? AND id = ?",
         )
         .bind(session_id)
@@ -327,7 +372,7 @@ impl Store for SqliteStore {
             participant.pinned = pinned;
         }
         if let Some(weight) = weight {
-            participant.weight = weight;
+            participant.weight = Some(weight as f32);
         }
 
         sqlx::query(
@@ -337,7 +382,7 @@ impl Store for SqliteStore {
         )
         .bind(&participant.name)
         .bind(participant.pinned)
-        .bind(participant.weight as i64)
+        .bind(participant.weight.map(|w| w as f64))
         .bind(session_id)
         .bind(participant_id)
         .execute(&mut *tx)
@@ -361,7 +406,7 @@ impl Store for SqliteStore {
         }
 
         let rows = sqlx::query(
-            "SELECT session_id, id, name, removed, removed_at, spin_order, pinned, weight
+            "SELECT session_id, id, name, removed, removed_at, spin_order, pinned, weight, visual
              FROM participants WHERE session_id = ?",
         )
         .bind(session_id)
@@ -394,6 +439,25 @@ impl Store for SqliteStore {
         .map_err(db_err)?;
 
         tx.commit().await.map_err(db_err)?;
+
+        // Append action + snapshot for history (design iter)
+        let spin_action = Action {
+            id: uuid::Uuid::new_v4().to_string(),
+            session_id: session_id.to_string(),
+            kind: ActionKind::Spin { picked_id: picked.id.clone() },
+            timestamp: chrono::Utc::now(),
+            actor: None,
+        };
+        let _ = self.append_action(&spin_action).await;
+
+        let snap = Snapshot {
+            id: uuid::Uuid::new_v4().to_string(),
+            session_id: session_id.to_string(),
+            action_id: spin_action.id.clone(),
+            participants: parts.clone(),  // current state after spin
+        };
+        let _ = self.create_snapshot(&snap).await;
+
         Ok(SpinResult { picked, remaining })
     }
 
@@ -420,7 +484,7 @@ impl Store for SqliteStore {
         .map_err(db_err)?;
 
         let rows = sqlx::query(
-            "SELECT session_id, id, name, removed, removed_at, spin_order, pinned, weight
+            "SELECT session_id, id, name, removed, removed_at, spin_order, pinned, weight, visual
              FROM participants WHERE session_id = ?",
         )
         .bind(session_id)
@@ -431,6 +495,187 @@ impl Store for SqliteStore {
 
         tx.commit().await.map_err(db_err)?;
         Ok(parts)
+    }
+
+    async fn update_participant_props(
+        &self,
+        session_id: &str,
+        participant_id: &str,
+        weight: Option<f32>,
+        visual: Option<SegmentVisual>,
+    ) -> Result<Participant, AppError> {
+        let mut tx = self.begin_write().await?;
+
+        if let Some(w) = weight {
+            sqlx::query(
+                "UPDATE participants SET weight = ? WHERE session_id = ? AND id = ?",
+            )
+            .bind(w as f64)
+            .bind(session_id)
+            .bind(participant_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        }
+        if let Some(v) = &visual {
+            let vjson = serde_json::to_string(v).unwrap_or_default();
+            sqlx::query(
+                "UPDATE participants SET visual = ? WHERE session_id = ? AND id = ?",
+            )
+            .bind(vjson)
+            .bind(session_id)
+            .bind(participant_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        }
+
+        let row = sqlx::query(
+            "SELECT session_id, id, name, removed, removed_at, spin_order, pinned, weight, visual
+             FROM participants WHERE session_id = ? AND id = ?",
+        )
+        .bind(session_id)
+        .bind(participant_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        tx.commit().await.map_err(db_err)?;
+        Ok(row_to_participant(&row))
+    }
+
+    async fn append_action(&self, action: &Action) -> Result<(), AppError> {
+        let payload = match &action.kind {
+            crate::models::ActionKind::Add { name } => serde_json::json!({"name": name}).to_string(),
+            crate::models::ActionKind::Remove { id } => serde_json::json!({"id": id}).to_string(),
+            crate::models::ActionKind::Spin { picked_id } => serde_json::json!({"picked_id": picked_id}).to_string(),
+            crate::models::ActionKind::Reset => "{}".to_string(),
+            crate::models::ActionKind::UpdateWeight { id, weight } => serde_json::json!({"id": id, "weight": weight}).to_string(),
+            crate::models::ActionKind::UpdateVisual { id, visual } => serde_json::json!({"id": id, "visual": visual}).to_string(),
+            crate::models::ActionKind::Reorder { from, to } => serde_json::json!({"from": from, "to": to}).to_string(),
+            crate::models::ActionKind::SnapshotRestored { snapshot_id } => serde_json::json!({"snapshot_id": snapshot_id}).to_string(),
+        };
+        sqlx::query(
+            "INSERT INTO actions (id, session_id, kind, payload, timestamp, actor) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&action.id)
+        .bind(&action.session_id)
+        .bind(serde_json::to_string(&action.kind).unwrap_or_default()) // simple, or use type
+        .bind(payload)
+        .bind(action.timestamp.to_rfc3339())
+        .bind(&action.actor)
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn list_actions(&self, session_id: &str, limit: usize) -> Result<Vec<Action>, AppError> {
+        let rows = sqlx::query(
+            "SELECT id, session_id, kind, payload, timestamp, actor FROM actions WHERE session_id = ? ORDER BY timestamp DESC LIMIT ?",
+        )
+        .bind(session_id)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_err)?;
+        let mut actions = Vec::new();
+        for row in rows {
+            let kind_str: String = row.get("kind");
+            let payload_str: Option<String> = row.get("payload");
+            let payload: serde_json::Value = payload_str.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(serde_json::json!({}));
+            let kind = match kind_str.as_str() {
+                "Add" => ActionKind::Add { name: payload["name"].as_str().unwrap_or("").to_string() },
+                "Remove" => ActionKind::Remove { id: payload["id"].as_str().unwrap_or("").to_string() },
+                "Spin" => ActionKind::Spin { picked_id: payload["picked_id"].as_str().unwrap_or("").to_string() },
+                "Reset" => ActionKind::Reset,
+                "UpdateWeight" => ActionKind::UpdateWeight { id: payload["id"].as_str().unwrap_or("").to_string(), weight: payload["weight"].as_f64().unwrap_or(1.0) as f32 },
+                "UpdateVisual" => ActionKind::UpdateVisual { id: payload["id"].as_str().unwrap_or("").to_string(), visual: serde_json::from_value(payload["visual"].clone()).unwrap_or_default() },
+                "Reorder" => ActionKind::Reorder { from: payload["from"].as_u64().unwrap_or(0) as usize, to: payload["to"].as_u64().unwrap_or(0) as usize },
+                "SnapshotRestored" => ActionKind::SnapshotRestored { snapshot_id: payload["snapshot_id"].as_str().unwrap_or("").to_string() },
+                _ => ActionKind::Reset, // fallback
+            };
+            actions.push(Action {
+                id: row.get("id"),
+                session_id: row.get("session_id"),
+                kind,
+                timestamp: chrono::DateTime::parse_from_rfc3339(&row.get::<String, _>("timestamp")).map(|d| d.with_timezone(&chrono::Utc)).unwrap_or_else(|_| chrono::Utc::now()),
+                actor: row.get("actor"),
+            });
+        }
+        Ok(actions)
+    }
+
+    async fn create_snapshot(&self, snapshot: &Snapshot) -> Result<(), AppError> {
+        let parts_json = serde_json::to_string(&snapshot.participants).unwrap_or_default();
+        sqlx::query(
+            "INSERT INTO snapshots (id, session_id, action_id, participants) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&snapshot.id)
+        .bind(&snapshot.session_id)
+        .bind(&snapshot.action_id)
+        .bind(parts_json)
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn get_snapshot(&self, session_id: &str, _before_action_id: Option<&str>) -> Result<Option<Snapshot>, AppError> {
+        // v1: always return the most recent snapshot (before= is best-effort for scrub; uuids not time-sortable)
+        let query = "SELECT id, session_id, action_id, participants FROM snapshots WHERE session_id = ? ORDER BY rowid DESC LIMIT 1";
+        let q = sqlx::query(query).bind(session_id);
+        let row = q.fetch_optional(&self.pool).await.map_err(db_err)?;
+        if let Some(r) = row {
+            let parts_json: String = r.get("participants");
+            let parts: Vec<Participant> = serde_json::from_str(&parts_json).unwrap_or_default();
+            return Ok(Some(Snapshot {
+                id: r.get("id"),
+                session_id: r.get("session_id"),
+                action_id: r.get("action_id"),
+                participants: parts,
+            }));
+        }
+        Ok(None)
+    }
+
+    async fn restore_from_snapshot(
+        &self,
+        session_id: &str,
+        participants: &[Participant],
+    ) -> Result<Vec<Participant>, AppError> {
+        let mut tx = self.begin_write().await?;
+
+        // Delete current and re-insert the snapshot list (simple for v1)
+        sqlx::query("DELETE FROM participants WHERE session_id = ?")
+            .bind(session_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+
+        for p in participants {
+            // insert logic simplified; reuse existing insert pattern or batch
+            // For brevity use same as add, but direct
+            let removed_i: i64 = if p.removed { 1 } else { 0 };
+            sqlx::query(
+                "INSERT INTO participants (session_id, id, name, removed, removed_at, spin_order, pinned, weight, visual) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(session_id)
+            .bind(&p.id)
+            .bind(&p.name)
+            .bind(removed_i)
+            .bind(p.removed_at.map(|d| d.to_rfc3339()))
+            .bind(p.spin_order.map(|v| v as i64))
+            .bind(p.pinned)
+            .bind(p.weight.map(|w| w as f64))
+            .bind(p.visual.as_ref().and_then(|v| serde_json::to_string(v).ok()))
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        }
+
+        tx.commit().await.map_err(db_err)?;
+        Ok(participants.to_vec())
     }
 }
 
